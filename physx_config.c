@@ -82,6 +82,330 @@ static const char *physx_settings_collision_scope_value(const char *value)
     return NULL;
 }
 
+static const physx_settings_binding_t *physx_settings_binding_by_name(
+    const char *name)
+{
+    size_t i;
+    if (!name) return NULL;
+    for (i = 0; i < sizeof(physx_settings_bindings) /
+                        sizeof(physx_settings_bindings[0]); i++) {
+        if (strcmp(name, physx_settings_bindings[i].param_name) == 0)
+            return &physx_settings_bindings[i];
+    }
+    return NULL;
+}
+
+static int physx_copy_engine_string(const char *value, char *out,
+                                    size_t out_size)
+{
+    int length;
+    size_t index;
+    if (!out || out_size == 0) return 0;
+    out[0] = 0;
+    if (!value || !ptr_readable(value, 1)) return 0;
+    if (ptr_readable(value - sizeof(int), sizeof(int))) {
+        memcpy(&length, value - sizeof(int), sizeof(length));
+        if (length >= 0 && length < 32768 &&
+            ptr_readable(value, (size_t)length + 1)) {
+            size_t copy_length = (size_t)length;
+            if (copy_length >= out_size) copy_length = out_size - 1;
+            memcpy(out, value, copy_length);
+            out[copy_length] = 0;
+            return 1;
+        }
+    }
+    for (index = 0; index + 1 < out_size; index++) {
+        if (!ptr_readable(value + index, 1)) return 0;
+        out[index] = value[index];
+        if (!out[index]) return 1;
+    }
+    out[out_size - 1] = 0;
+    return 1;
+}
+
+static int physx_custom_parameter_name(void *parameter, char *out,
+                                       size_t out_size)
+{
+    HMODULE executable;
+    BYTE *base;
+    DWORD member_id;
+    BYTE dispatch_slot;
+    BYTE *metadata;
+    BYTE *dispatch_table;
+    script_get_string_t getter;
+    engine_string_release_t release_string = NULL;
+    char *engine_value;
+    int copied;
+    ULONG_PTR tagged_value = (ULONG_PTR)parameter;
+    if (!parameter || ((~tagged_value & 0x08u) == 0u) || !out ||
+        out_size == 0 ||
+        !ptr_readable((BYTE*)parameter - SCRIPT_OBJECT_META_BACK_OFFSET,
+                      sizeof(metadata))) return 0;
+    out[0] = 0;
+    executable = GetModuleHandleA(NULL);
+    if (!executable) return 0;
+    base = (BYTE*)executable;
+    if (!ptr_readable(base + PHYSX_CUSTOM_PARAMETER_NAME_MEMBER_RVA,
+                      sizeof(member_id)) ||
+        !ptr_readable(base + PHYSX_ENGINE_EMPTY_STRING_RVA,
+                      sizeof(engine_value))) return 0;
+    memcpy(&member_id, base + PHYSX_CUSTOM_PARAMETER_NAME_MEMBER_RVA,
+           sizeof(member_id));
+    dispatch_slot = *(base + PHYSX_CUSTOM_PARAMETER_NAME_MEMBER_RVA + 3u);
+    memcpy(&metadata,
+           (BYTE*)parameter - SCRIPT_OBJECT_META_BACK_OFFSET,
+           sizeof(metadata));
+    if (!metadata ||
+        !ptr_readable(metadata + (member_id & 0x0fffu) * sizeof(void*),
+                      sizeof(dispatch_table))) return 0;
+    memcpy(&dispatch_table,
+           metadata + (member_id & 0x0fffu) * sizeof(void*),
+           sizeof(dispatch_table));
+    if (!dispatch_table ||
+        !ptr_readable(dispatch_table + ((size_t)dispatch_slot << 6),
+                      sizeof(getter))) return 0;
+    memcpy(&getter, dispatch_table + ((size_t)dispatch_slot << 6),
+           sizeof(getter));
+    if (!ptr_executable((const void*)getter)) return 0;
+    memcpy(&engine_value, base + PHYSX_ENGINE_EMPTY_STRING_RVA,
+           sizeof(engine_value));
+    getter(parameter, member_id, &engine_value);
+    copied = physx_copy_engine_string(engine_value, out, out_size);
+    if (ptr_readable(base + PHYSX_ENGINE_STRING_RELEASE_RVA,
+                     sizeof(release_string))) {
+        memcpy(&release_string, base + PHYSX_ENGINE_STRING_RELEASE_RVA,
+               sizeof(release_string));
+        if (release_string) release_string(&engine_value);
+    }
+    return copied;
+}
+
+static int physx_spinbox_widget_value(void *widget, char *out,
+                                      size_t out_size)
+{
+    HMODULE executable;
+    BYTE *base;
+    BYTE *metadata;
+    BYTE *dispatch_table;
+    script_get_string_t getter;
+    engine_string_release_t release_string = NULL;
+    char *engine_value;
+    int copied;
+    if (!widget || !out || out_size == 0 ||
+        !ptr_readable((BYTE*)widget - SCRIPT_OBJECT_META_BACK_OFFSET,
+                      sizeof(metadata))) return 0;
+    out[0] = 0;
+    executable = GetModuleHandleA(NULL);
+    if (!executable) return 0;
+    base = (BYTE*)executable;
+    if (!ptr_readable(base + PHYSX_ENGINE_EMPTY_STRING_RVA,
+                      sizeof(engine_value))) return 0;
+    memcpy(&metadata,
+           (BYTE*)widget - SCRIPT_OBJECT_META_BACK_OFFSET,
+           sizeof(metadata));
+    if (!metadata ||
+        !ptr_readable(metadata +
+                          (PHYSX_WIDGET_TEXT_MEMBER_ID & 0x0fffu) *
+                              sizeof(void*),
+                      sizeof(dispatch_table))) return 0;
+    memcpy(&dispatch_table,
+           metadata + (PHYSX_WIDGET_TEXT_MEMBER_ID & 0x0fffu) *
+                          sizeof(void*),
+           sizeof(dispatch_table));
+    if (!dispatch_table ||
+        !ptr_readable(dispatch_table + 0x100, sizeof(getter))) return 0;
+    memcpy(&getter, dispatch_table + 0x100, sizeof(getter));
+    if (!ptr_executable((const void*)getter)) return 0;
+    memcpy(&engine_value, base + PHYSX_ENGINE_EMPTY_STRING_RVA,
+           sizeof(engine_value));
+    getter(widget, PHYSX_WIDGET_TEXT_MEMBER_ID, &engine_value);
+    copied = physx_copy_engine_string(engine_value, out, out_size);
+    if (ptr_readable(base + PHYSX_ENGINE_STRING_RELEASE_RVA,
+                     sizeof(release_string))) {
+        memcpy(&release_string, base + PHYSX_ENGINE_STRING_RELEASE_RVA,
+               sizeof(release_string));
+        if (release_string) release_string(&engine_value);
+    }
+    return copied;
+}
+
+static int physx_spinbox_widget_set_value(void *widget, const char *value)
+{
+    HMODULE executable;
+    BYTE *base;
+    BYTE *metadata;
+    BYTE *dispatch_table;
+    engine_string_construct_cstr_t construct_string;
+    engine_string_release_t release_string;
+    widget_set_string_t setter;
+    char *engine_value = NULL;
+    if (!widget || !value ||
+        !ptr_readable((BYTE*)widget - SCRIPT_OBJECT_META_BACK_OFFSET,
+                      sizeof(metadata))) return 0;
+    executable = GetModuleHandleA(NULL);
+    if (!executable) return 0;
+    base = (BYTE*)executable;
+    if (!ptr_readable(base + PHYSX_ENGINE_STRING_CSTR_CONSTRUCT_RVA,
+                      sizeof(construct_string)) ||
+        !ptr_readable(base + PHYSX_ENGINE_STRING_RELEASE_RVA,
+                      sizeof(release_string))) return 0;
+    memcpy(&metadata,
+           (BYTE*)widget - SCRIPT_OBJECT_META_BACK_OFFSET,
+           sizeof(metadata));
+    if (!metadata ||
+        !ptr_readable(metadata +
+                          (PHYSX_WIDGET_TEXT_MEMBER_ID & 0x0fffu) *
+                              sizeof(void*),
+                      sizeof(dispatch_table))) return 0;
+    memcpy(&dispatch_table,
+           metadata + (PHYSX_WIDGET_TEXT_MEMBER_ID & 0x0fffu) *
+                          sizeof(void*),
+           sizeof(dispatch_table));
+    if (!dispatch_table ||
+        !ptr_readable(dispatch_table + 0x104, sizeof(setter))) return 0;
+    memcpy(&setter, dispatch_table + 0x104, sizeof(setter));
+    memcpy(&construct_string,
+           base + PHYSX_ENGINE_STRING_CSTR_CONSTRUCT_RVA,
+           sizeof(construct_string));
+    memcpy(&release_string, base + PHYSX_ENGINE_STRING_RELEASE_RVA,
+           sizeof(release_string));
+    if (!ptr_executable((const void*)setter) ||
+        !ptr_executable((const void*)construct_string) ||
+        !ptr_executable((const void*)release_string)) return 0;
+    construct_string(&engine_value, value);
+    if (!engine_value) return 0;
+    setter(widget, PHYSX_WIDGET_TEXT_MEMBER_ID, engine_value);
+    release_string(&engine_value);
+    return 1;
+}
+
+static int physx_setting_ini_spinbox_value(
+    const physx_settings_binding_t *binding, char *out, size_t out_size)
+{
+    int enabled;
+    const char *scope;
+    if (!binding || !out || out_size == 0) return 0;
+    out[0] = 0;
+    if (!config_path[0]) config_file_path(config_path, sizeof(config_path));
+    if (!GetPrivateProfileStringA(binding->section, binding->key, "", out,
+                                  (DWORD)out_size, config_path) || !out[0])
+        return 0;
+    if (strcmp(binding->key, "collision_scope") == 0) {
+        scope = physx_settings_collision_scope_value(out);
+        if (!scope) return 0;
+        lstrcpynA(out, scope, (int)out_size);
+    } else {
+        if (!physx_settings_bool_value(out, &enabled)) return 0;
+        lstrcpynA(out, enabled ? "ON" : "OFF", (int)out_size);
+    }
+    return 1;
+}
+
+static void physx_sync_spinbox_from_ini(
+    const physx_settings_binding_t *binding, void *widget)
+{
+    char requested[128];
+    char current[128];
+    if (!binding || !widget ||
+        !physx_setting_ini_spinbox_value(binding, requested,
+                                         sizeof(requested))) return;
+    if (physx_spinbox_widget_value(widget, current, sizeof(current)) &&
+        _stricmp(current, requested) == 0) return;
+    physx_settings_sync_depth++;
+    if (!physx_spinbox_widget_set_value(widget, requested)) {
+        physx_settings_sync_depth--;
+        if (defaults_cfg.debug)
+            log_line("settings spinbox sync failed param=\"%s\" requested=\"%s\" widget=%p",
+                     binding->param_name, requested, widget);
+        return;
+    }
+    physx_settings_sync_depth--;
+    if (defaults_cfg.debug)
+        log_line("settings spinbox synced param=\"%s\" ini=\"%s\"",
+                 binding->param_name, requested);
+}
+
+static int THISCALL hook_Customizer_BuildControls_PhysX(
+    void *self, void *arg1, void *arg2, void *arg3)
+{
+    int result;
+    void **parameters = NULL;
+    void **records = NULL;
+    int parameter_count = 0;
+    int record_count = 0;
+    int count;
+    int index;
+    result = real_Customizer_BuildControls ?
+        real_Customizer_BuildControls(self, arg1, arg2, arg3) : 0;
+    if (!self ||
+        !ptr_readable((BYTE*)self + 0x14, sizeof(parameters)) ||
+        !ptr_readable((BYTE*)self + 0x18, sizeof(records))) return result;
+    memcpy(&parameters, (BYTE*)self + 0x14, sizeof(parameters));
+    memcpy(&records, (BYTE*)self + 0x18, sizeof(records));
+    if (!parameters || !records ||
+        !ptr_readable((BYTE*)parameters - sizeof(parameter_count),
+                      sizeof(parameter_count)) ||
+        !ptr_readable((BYTE*)records - sizeof(record_count),
+                      sizeof(record_count))) return result;
+    memcpy(&parameter_count,
+           (BYTE*)parameters - sizeof(parameter_count),
+           sizeof(parameter_count));
+    memcpy(&record_count, (BYTE*)records - sizeof(record_count),
+           sizeof(record_count));
+    if (parameter_count <= 0 || record_count <= 0 ||
+        parameter_count > 4096 || record_count > 4096) return result;
+    count = parameter_count < record_count ? parameter_count : record_count;
+    if (!ptr_readable(parameters, (size_t)count * sizeof(*parameters)) ||
+        !ptr_readable(records, (size_t)count * sizeof(*records))) return result;
+    for (index = 0; index < count; index++) {
+        char parameter_name[128];
+        void *record = records[index];
+        void *widget = NULL;
+        const physx_settings_binding_t *binding;
+        if (!parameters[index] || !record ||
+            !physx_custom_parameter_name(parameters[index], parameter_name,
+                                         sizeof(parameter_name))) continue;
+        binding = physx_settings_binding_by_name(parameter_name);
+        if (!binding ||
+            !ptr_readable((BYTE*)record + 0x24, sizeof(widget))) continue;
+        memcpy(&widget, (BYTE*)record + 0x24, sizeof(widget));
+        if (widget) physx_sync_spinbox_from_ini(binding, widget);
+    }
+    return result;
+}
+
+static void patch_config_editor_spinbox_sync(void)
+{
+    static const BYTE expected[9] = {
+        0x55, 0x8b, 0xec, 0x81, 0xec, 0xe0, 0x01, 0x00, 0x00
+    };
+    HMODULE executable;
+    BYTE *target;
+    if (config_editor_spinbox_sync_hook_installed) return;
+    executable = GetModuleHandleA(NULL);
+    if (!executable) return;
+    target = (BYTE*)executable + 0x001c5110;
+    if (!ptr_executable(target)) return;
+    if (target[0] != 0xe9 && memcmp(target, expected, sizeof(expected)) != 0) {
+        if (!config_editor_spinbox_sync_hook_logged) {
+            config_editor_spinbox_sync_hook_logged = 1;
+            log_line("settings ConfigEditor spinbox sync unavailable target=%p reason=\"unsupported TK17 executable build\"",
+                     target);
+        }
+        return;
+    }
+    if (install_inline_hook(target,
+                            (void*)hook_Customizer_BuildControls_PhysX,
+                            sizeof(expected),
+                            (void**)&real_Customizer_BuildControls)) {
+        config_editor_spinbox_sync_hook_installed = 1;
+        log_line("settings ConfigEditor spinbox sync installed target=%p previous=%p bindings=%u source=Extensions\\PhysX\\Config.ini",
+                 target, (void*)real_Customizer_BuildControls,
+                 (unsigned int)(sizeof(physx_settings_bindings) /
+                                sizeof(physx_settings_bindings[0])));
+    }
+}
+
 static int physx_settings_enabled_person_index(const char *key)
 {
     if (!key) return -1;

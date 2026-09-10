@@ -202,17 +202,40 @@ static int patch_runtime_animation_member_setter_slot(
     return 1;
 }
 
+static int patch_runtime_f32_member_setter_slot(
+    void **slot, void *hook, script_f32_set_property_t *original)
+{
+    void *current;
+    DWORD old;
+    if (!slot || !hook || !original ||
+        !ptr_readable(slot, sizeof(void*))) return 0;
+    current = *slot;
+    if (current == hook) return *original != NULL;
+    if (!ptr_executable(current)) return 0;
+    if (!*original) *original = (script_f32_set_property_t)current;
+    else if ((void*)*original != current) return 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return 0;
+    *slot = hook;
+    VirtualProtect(slot, sizeof(void*), old, &old);
+    FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+    return 1;
+}
+
 static void patch_runtime_animation_member_setters(void)
 {
     int ssimple_ok;
     int sjoint_ok;
-    if (runtime_animation_member_setters_installed) return;
+    if (runtime_animation_member_setters_installed &&
+        runtime_blendcontrol_weight_setter_installed) return;
     runtime_ssimple_rotation_set_slot =
         runtime_animation_member_setter_slot(
             SCRIPT_PROPERTY_SSIMPLE_ROTATION);
     runtime_sjoint_rotation_axis_set_slot =
         runtime_animation_member_setter_slot(
             SCRIPT_PROPERTY_SJOINT_ROTATION_AXIS);
+    runtime_blendcontrol_weight_set_slot =
+        runtime_animation_member_setter_slot(
+            SCRIPT_PROPERTY_BLENDCONTROL_WEIGHT);
     ssimple_ok = patch_runtime_animation_member_setter_slot(
         runtime_ssimple_rotation_set_slot,
         (void*)hook_SSimpleTransform_RotationSet,
@@ -223,6 +246,11 @@ static void patch_runtime_animation_member_setters(void)
         &real_SJoint_RotationAxisSet);
     runtime_animation_member_setters_installed =
         ssimple_ok && sjoint_ok;
+    runtime_blendcontrol_weight_setter_installed =
+        patch_runtime_f32_member_setter_slot(
+            runtime_blendcontrol_weight_set_slot,
+            (void*)hook_BlendControl_WeightSet,
+            &real_BlendControl_WeightSet);
     if (runtime_animation_member_setters_installed &&
         !runtime_animation_member_setters_logged) {
         runtime_animation_member_setters_logged = 1;
@@ -231,6 +259,13 @@ static void patch_runtime_animation_member_setters(void)
                  (void*)real_SSimpleTransform_RotationSet,
                  runtime_sjoint_rotation_axis_set_slot,
                  (void*)real_SJoint_RotationAxisSet);
+    }
+    if (runtime_blendcontrol_weight_setter_installed &&
+        !runtime_blendcontrol_weight_setter_logged) {
+        runtime_blendcontrol_weight_setter_logged = 1;
+        log_line("runtime BlendControl.Weight overlay installed slot=%p original=%p note=\"only exact, short-lived public overlay controls are changed\"",
+                 runtime_blendcontrol_weight_set_slot,
+                 (void*)real_BlendControl_WeightSet);
     }
 }
 
@@ -260,7 +295,12 @@ static void restore_runtime_animation_member_setters(void)
         runtime_sjoint_rotation_axis_set_slot,
         (void*)hook_SJoint_RotationAxisSet,
         real_SJoint_RotationAxisSet);
+    restore_runtime_animation_member_setter_slot(
+        runtime_blendcontrol_weight_set_slot,
+        (void*)hook_BlendControl_WeightSet,
+        (script_vector3_set_property_t)real_BlendControl_WeightSet);
     runtime_animation_member_setters_installed = 0;
+    runtime_blendcontrol_weight_setter_installed = 0;
 }
 
 static void patch_addon_constraint_count_getter(void)
@@ -396,6 +436,21 @@ static void THISCALL hook_SSimpleTransform_RotationSet(
     }
 }
 
+static void THISCALL hook_BlendControl_WeightSet(
+    void *self, DWORD member_id, float value)
+{
+    float applied = value;
+    static LONG trace_count;
+    int overlaid = member_id == SCRIPT_PROPERTY_BLENDCONTROL_WEIGHT &&
+        physx_public_get_blend_control_overlay(self, &applied);
+    if (real_BlendControl_WeightSet)
+        real_BlendControl_WeightSet(self, member_id, applied);
+    if (overlaid && defaults_cfg.debug &&
+        InterlockedIncrement(&trace_count) <= 24)
+        log_line("BlendControl.Weight overlay intercepted control=%p input=%.3f applied=%.3f",
+                 self, value, applied);
+}
+
 static void THISCALL hook_SJoint_RotationAxisSet(
     void *self, DWORD member_id, const float *value)
 {
@@ -459,7 +514,7 @@ static void patch_config_editor_param_change(void)
                             CONFIG_EDITOR_PARAM_CHANGE_STOLEN_LEN,
                             (void**)&real_ConfigEditor_ParamChange)) {
         config_editor_param_change_hook_installed = 1;
-        log_line("settings ConfigEditor hook installed target=%p trampoline=%p params=15 note=\"only the remaining NCPhysX-prefixed global controls write NC-TK17-PhysX.ini; per-person toggles are handled directly by the context menu\"",
+        log_line("settings ConfigEditor hook installed target=%p trampoline=%p params=20 note=\"NCPhysX-prefixed global controls write Extensions\\PhysX\\Config.ini; per-person toggles are handled directly by the context menu\"",
                  target, (void*)real_ConfigEditor_ParamChange);
     }
 }
@@ -486,7 +541,7 @@ static void THISCALL hook_ConfigEditor_ParamChange(void *self,
         real_ConfigEditor_ParamChange(self, param_name, string_value,
                                       value_arg, event_arg);
     }
-    if (is_physx) {
+    if (is_physx && !physx_settings_sync_depth) {
         handle_physx_settings_change(param_copy,
                                      value_copy[0] ? value_copy : NULL);
     }
@@ -1312,7 +1367,21 @@ static void __cdecl hook_UpdateTraverse(void *object,
 
 static DWORD THISCALL hook_AppBase_ProcessAnimation(void *self)
 {
+    static DWORD pre_trace_tick;
+    static DWORD post_trace_tick;
     DWORD result = 0x80000001u;
+    DWORD now = GetTickCount();
+    /* Advanced preview builds its displayed runtime model from the current
+       BlendControl values inside ProcessAnimation.  Consumer overlays must
+       therefore exist before that evaluation; the post-call application is
+       retained because ordinary runtime animation may write the controls. */
+    physx_public_run_post_animation_callbacks();
+    if (physx_public_has_post_animation_callbacks() &&
+        now - pre_trace_tick >= 1000u) {
+        pre_trace_tick = now;
+        log_line("post-animation consumer phase=AppBase-pre self=%p note=\"diagnostic: control is supplied before runtime/advanced-preview evaluation\"",
+                 self);
+    }
     if (tramp_AppBase_ProcessAnimation) {
         result = tramp_AppBase_ProcessAnimation(self);
     } else if (real_AppBase_ProcessAnimation &&
@@ -1321,7 +1390,32 @@ static DWORD THISCALL hook_AppBase_ProcessAnimation(void *self)
         result = real_AppBase_ProcessAnimation(self);
     }
     physx_body_chain_apply_post_animation_ownership();
+    physx_public_run_post_animation_callbacks();
+    if (physx_public_has_post_animation_callbacks() &&
+        now - post_trace_tick >= 1000u) {
+        post_trace_tick = now;
+        log_line("post-animation consumer phase=AppBase-post self=%p note=\"diagnostic: control reapplied after runtime evaluation\"",
+                 self);
+    }
     return result;
+}
+
+/* PoseEditor owns a separate animation path. Its live track pass occurs
+   after AppBase::ProcessAnimation/transform traversal, so consumer overlays
+   must be composed after this function, not merely after the FreeMode pass. */
+static void THISCALL hook_PoseEdit_UpdateObjectsFromTracks(void *self)
+{
+    static DWORD trace_tick;
+    DWORD now = GetTickCount();
+    if (tramp_PoseEdit_UpdateObjectsFromTracks)
+        tramp_PoseEdit_UpdateObjectsFromTracks(self);
+    physx_public_run_post_animation_callbacks();
+    if (physx_public_has_post_animation_callbacks() &&
+        now - trace_tick >= 1000u) {
+        trace_tick = now;
+        log_line("post-animation consumer phase=PoseEdit-post-tracks self=%p note=\"diagnostic: control reapplied after ordinary PoseEditor track evaluation\"",
+                 self);
+    }
 }
 
 /* FreeMode calls SYS+0xE2A70 directly for its live output-joint animation,

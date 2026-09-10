@@ -19,6 +19,12 @@
 #include "physx_single_bone_contact.h"
 #include "physx_collision_frame.h"
 
+#define PHYSX_DEFAULT_CONFIG_RESOURCE_ID 101
+
+/* Declared early because the profile wrappers must distinguish the global
+   Config.ini from optional body-sidecar INI files. */
+static char config_path[MAX_PATH * 4];
+
 static int raw_profile_key_exists_a(const char *section, const char *key,
                                     const char *path)
 {
@@ -130,7 +136,7 @@ static int body_profile_is_body_sidecar_name(const char *path)
 
 static int body_profile_is_global_config_path_a(const char *path)
 {
-    return _stricmp(body_profile_basename_a(path), "NC-TK17-PhysX.ini") == 0;
+    return path && config_path[0] && _stricmp(path, config_path) == 0;
 }
 
 static int body_profile_section_allowed_a(const char *section)
@@ -228,9 +234,18 @@ typedef void (__cdecl *set_ts_node_name_t)(void *, const void *);
 #endif
 
 typedef void *(THISCALL *get_weak_obj_target_t)(void *);
+typedef const void *(THISCALL *object_get_type_info_t)(const void *);
+typedef const void *(__cdecl *static_get_type_info_t)(void);
 typedef void (THISCALL *script_get_index_scriptobject_t)(void *, const void *, void *);
 typedef void (THISCALL *apptracker_set_world_matrix_inverse_t)(void *, const float *);
 typedef void (THISCALL *config_editor_param_change_t)(void *, const char *, const char *, DWORD, DWORD);
+typedef int (THISCALL *customizer_build_controls_t)(void *, void *, void *,
+                                                     void *);
+typedef void (THISCALL *script_get_string_t)(void *, DWORD, char **);
+typedef void (THISCALL *engine_string_release_t)(char **);
+typedef void (THISCALL *engine_string_construct_cstr_t)(char **,
+                                                        const char *);
+typedef void (THISCALL *widget_set_string_t)(void *, DWORD, const char *);
 typedef void (THISCALL *person_context_rebuild_t)(void *, void *, void *);
 typedef DWORD (__cdecl *app_main_command_t)(void *);
 typedef unsigned int (THISCALL *stringref_hash32_t)(const void *);
@@ -241,6 +256,7 @@ typedef void *(__cdecl *clone_node_t)(void *, void *);
 typedef int (THISCALL *script_bool_property_t)(void *, DWORD);
 typedef unsigned int (THISCALL *script_u32_property_t)(void *, DWORD);
 typedef void (THISCALL *script_u32_set_property_t)(void *, DWORD, unsigned int);
+typedef void (THISCALL *script_f32_set_property_t)(void *, DWORD, float);
 typedef void (THISCALL *script_vector3_set_property_t)(void *, DWORD,
                                                        const float *);
 typedef int (THISCALL *script_index_count_property_t)(void *, DWORD);
@@ -251,6 +267,7 @@ typedef unsigned char (THISCALL *poseedit_track_evaluate_t)(void *, float *, dou
 typedef void (THISCALL *poseedit_track_update_t)(void *, double);
 typedef void (__cdecl *update_traverse_t)(void *, const float *, unsigned int);
 typedef DWORD (THISCALL *appbase_process_animation_t)(void *);
+typedef void (__cdecl *physx_post_animation_callback_t)(void);
 typedef void (THISCALL *runtime_rotation_vector_write_t)(void *,
                                                          const float *);
 typedef void (__cdecl *model_pivot_t)(void *, float *);
@@ -259,6 +276,7 @@ static int install_inline_hook(void *target, void *hook, size_t stolen_len, void
 static void patch_poseedit_inittracks_hook(void);
 static void restore_poseedit_inittracks_hook(void);
 static void patch_config_editor_param_change(void);
+static void patch_config_editor_spinbox_sync(void);
 static void patch_person_context_rebuild(void);
 static void patch_app_main_command(void);
 static void patch_runtime_animation_member_setters(void);
@@ -271,6 +289,10 @@ static void body_chain_poll_poseeditor_mode(DWORD now);
 static int physx_body_chain_apply_traverse_overlay(void *object,
                                                    int allow_global);
 static void physx_body_chain_apply_post_animation_ownership(void);
+static void physx_public_run_post_animation_callbacks(void);
+static int physx_public_has_post_animation_callbacks(void);
+static int physx_public_get_blend_control_overlay(void *control,
+                                                  float *weight);
 static void restore_collision_auto_test_active(void);
 static void THISCALL hook_AppTracker_SetWorldMatrixInverse(void *self, const float *matrix);
 static void THISCALL hook_ConfigEditor_ParamChange(void *self, const char *param_name,
@@ -293,6 +315,7 @@ static void *__cdecl hook_CloneObject(const void *source);
 static void *__cdecl hook_CloneNode(void *source, void *clone_map);
 static void __cdecl hook_UpdateTraverse(void *object, const float *matrix, unsigned int flags);
 static DWORD THISCALL hook_AppBase_ProcessAnimation(void *self);
+static void THISCALL hook_PoseEdit_UpdateObjectsFromTracks(void *self);
 static void THISCALL hook_RuntimeRotationVectorWrite(
     void *self, const float *value);
 static void THISCALL hook_RuntimeJointRotationAxisWrite(
@@ -301,6 +324,8 @@ static void THISCALL hook_SSimpleTransform_RotationSet(
     void *self, DWORD member_id, const float *value);
 static void THISCALL hook_SJoint_RotationAxisSet(
     void *self, DWORD member_id, const float *value);
+static void THISCALL hook_BlendControl_WeightSet(
+    void *self, DWORD member_id, float value);
 static int THISCALL hook_TBaseTransform_ConstraintArrayCount(
     void *self, DWORD member_id);
 static void __stdcall hook_PoseEdit_InitTracks(void);
@@ -344,6 +369,11 @@ static const char *body_chain_collider_node_label(int node_index);
 #define PERSON_INERTIA_BUTT_R_FIELD8_OFFSET 0x468
 #define PERSON_INERTIA_POSEEDIT_FLAG 0x4
 #define SCRIPT_OBJECT_META_BACK_OFFSET 0x018
+#define PHYSX_CUSTOM_PARAMETER_NAME_MEMBER_RVA 0x002B0438u
+#define PHYSX_ENGINE_EMPTY_STRING_RVA 0x002B0D80u
+#define PHYSX_ENGINE_STRING_CSTR_CONSTRUCT_RVA 0x0024A9E4u
+#define PHYSX_ENGINE_STRING_RELEASE_RVA 0x0024A9E8u
+#define PHYSX_WIDGET_TEXT_MEMBER_ID 0x04FFF0EBu
 #define SCRIPT_OBJECT_DISPATCH_TABLE_OFFSET 0x10C
 #define SCRIPT_OBJECT_BOOL_DISPATCH_OFFSET 0x180
 #define SCRIPT_OBJECT_BOOL_SET_DISPATCH_OFFSET 0x184
@@ -354,6 +384,7 @@ static const char *body_chain_collider_node_label(int node_index);
 #define SCRIPT_PROPERTY_WIDGET_VISIBILITY 0x05FFF0D8
 #define SCRIPT_PROPERTY_SSIMPLE_ROTATION 0x02FFF04A
 #define SCRIPT_PROPERTY_SJOINT_ROTATION_AXIS 0x01FFF04E
+#define SCRIPT_PROPERTY_BLENDCONTROL_WEIGHT 0x01FFF08E
 #define SCRIPT_PROPERTY_TBASE_CONSTRAINT_ARRAY 0x03FFF049
 #define RUNTIME_ROTATION_VECTOR_WRITE_RVA 0x000E2A70u
 #define RUNTIME_JOINT_ROTATION_AXIS_WRITE_RVA 0x000DCA90u
@@ -1954,7 +1985,6 @@ static DWORD testicle_physics_settings_change_tick[4];
 static int testicle_physics_settings_change_enabled[4];
 static DWORD body_chain_collision_settings_change_tick[4];
 static int body_chain_collision_settings_change_enabled[4];
-static char config_path[MAX_PATH * 4];
 static physx_defaults_t defaults_cfg = {
     0.65f, 0.25f, { 0.0f, -1.0f, 0.0f }, 35.0f, 0, 0, 250
 };
@@ -2672,6 +2702,10 @@ static body_chain_gravity_snapshot_t breasts_physics_room_gravity_cache[4];
 static breasts_physics_person_state_t butt_physics_states[4];
 static body_chain_gravity_snapshot_t butt_physics_room_gravity_cache[4];
 static body_chain_collider_person_state_t body_chain_collider_states[4];
+/* Optional read-only consumers (currently NC-TK17-Liquids) request complete
+   live body collider coverage only while they have active work. Keeping this
+   as a short heartbeat preserves the normal scoped/idle PhysX fast path. */
+static volatile LONG body_chain_external_query_tick;
 static const body_collider_direct_node_def_t body_collider_direct_nodes[BODY_COLLIDER_DIRECT_NODE_COUNT] = {
     { BODY_COLLIDER_STOMACH_03, "spine_joint03", "Sspine_joint03", 1, "engine-pivot:spine_joint03" },
     { BODY_COLLIDER_STOMACH_04, "spine_joint04", "Sspine_joint04", 1, "engine-pivot:spine_joint04" },
@@ -3283,10 +3317,13 @@ static SwapBuffers_t real_SwapBuffers;
 static CreateFileA_t real_CreateFileA;
 static CreateFileW_t real_CreateFileW;
 static get_weak_obj_target_t engine_GetWeakObjTarget;
+static object_get_type_info_t engine_ObjectGetTypeInfo;
+static const void *engine_BlendControlTypeInfo;
 static script_get_index_scriptobject_t engine_ScriptObjectGetIndexScriptObject;
 static apptracker_set_world_matrix_inverse_t real_AppTracker_SetWorldMatrixInverse;
 static apptracker_set_world_matrix_inverse_t tramp_AppTracker_SetWorldMatrixInverse;
 static config_editor_param_change_t real_ConfigEditor_ParamChange;
+static customizer_build_controls_t real_Customizer_BuildControls;
 static person_context_rebuild_t real_PersonContext_Rebuild;
 static app_main_command_t real_AppMain_Command;
 static stringref_hash32_t engine_StringRefHash32;
@@ -3301,6 +3338,8 @@ static update_traverse_t real_UpdateTraverse;
 static update_traverse_t tramp_UpdateTraverse;
 static appbase_process_animation_t real_AppBase_ProcessAnimation;
 static appbase_process_animation_t tramp_AppBase_ProcessAnimation;
+static poseedit_update_objects_from_tracks_t
+    tramp_PoseEdit_UpdateObjectsFromTracks;
 static runtime_rotation_vector_write_t real_RuntimeRotationVectorWrite;
 static runtime_rotation_vector_write_t tramp_RuntimeRotationVectorWrite;
 static int runtime_rotation_vector_write_hook_logged;
@@ -3311,11 +3350,15 @@ static tbase_set_matrix_version_t engine_TBaseTransformSetMatrixVersion;
 static void ***engine_G_MasterIsMVTBL_ptr;
 static void **runtime_ssimple_rotation_set_slot;
 static void **runtime_sjoint_rotation_axis_set_slot;
+static void **runtime_blendcontrol_weight_set_slot;
 static script_vector3_set_property_t
     real_SSimpleTransform_RotationSet;
 static script_vector3_set_property_t real_SJoint_RotationAxisSet;
+static script_f32_set_property_t real_BlendControl_WeightSet;
 static int runtime_animation_member_setters_installed;
 static int runtime_animation_member_setters_logged;
+static int runtime_blendcontrol_weight_setter_installed;
+static int runtime_blendcontrol_weight_setter_logged;
 static void **addon_constraint_count_getter_slot;
 static script_index_count_property_t real_AddonConstraintArrayCount;
 static int addon_constraint_count_getter_installed;
@@ -3334,6 +3377,9 @@ static int poseedit_inittracks_hook_installed;
 static int poseedit_inittracks_hook_logged;
 static int config_editor_param_change_hook_installed;
 static int config_editor_param_change_hook_logged;
+static int config_editor_spinbox_sync_hook_installed;
+static int config_editor_spinbox_sync_hook_logged;
+static int physx_settings_sync_depth;
 static int person_context_rebuild_hook_installed;
 static int person_context_rebuild_hook_logged;
 static int app_main_command_hook_installed;
@@ -4174,6 +4220,29 @@ static int ptr_readable(const void *p, size_t bytes)
     return 1;
 }
 
+static int ptr_writable(void *p, size_t bytes)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    BYTE *cur = (BYTE*)p;
+    BYTE *end = cur + bytes;
+    if (!p || end < cur) return 0;
+    while (cur < end) {
+        DWORD protect;
+        if (!VirtualQuery(cur, &mbi, sizeof(mbi)) ||
+            mbi.State != MEM_COMMIT ||
+            (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            return 0;
+        protect = mbi.Protect & 0xffu;
+        if (protect != PAGE_READWRITE &&
+            protect != PAGE_WRITECOPY &&
+            protect != PAGE_EXECUTE_READWRITE &&
+            protect != PAGE_EXECUTE_WRITECOPY)
+            return 0;
+        cur = (BYTE*)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return 1;
+}
+
 static int safe_cstr_a(const char *s, size_t max)
 {
     size_t i;
@@ -4231,28 +4300,66 @@ static int filetime_differs(const FILETIME *a, const FILETIME *b)
 
 static void config_file_path(char *out, size_t outsz)
 {
+    char binary_dir[MAX_PATH * 4];
+    char game_dir[MAX_PATH * 4];
+    char extensions_dir[MAX_PATH * 4];
+    char physx_dir[MAX_PATH * 4];
+    char *slash;
+    HRSRC resource;
+    HGLOBAL loaded_resource;
+    const void *default_data;
+    DWORD default_size;
+    HANDLE file;
+    DWORD written;
+
+    if (!out || outsz == 0) return;
     out[0] = 0;
-    if (self_module) {
-        GetModuleFileNameA(self_module, out, (DWORD)outsz);
-        {
-            char *slash = strrchr(out, '\\');
-            if (slash) slash[1] = 0;
-        }
-    }
-    lstrcatA(out, "NC-TK17-PhysX.ini");
+    if (!self_module) return;
+
+    binary_dir[0] = 0;
+    GetModuleFileNameA(self_module, binary_dir, sizeof(binary_dir));
+    slash = strrchr(binary_dir, '\\');
+    if (!slash) return;
+    *slash = 0;
+
+    lstrcpynA(game_dir, binary_dir, sizeof(game_dir));
+    slash = strrchr(game_dir, '\\');
+    if (slash && _stricmp(slash + 1, "Binaries") == 0) *slash = 0;
+
+    _snprintf(extensions_dir, sizeof(extensions_dir) - 1,
+              "%s\\Extensions", game_dir);
+    extensions_dir[sizeof(extensions_dir) - 1] = 0;
+    CreateDirectoryA(extensions_dir, NULL);
+
+    _snprintf(physx_dir, sizeof(physx_dir) - 1,
+              "%s\\PhysX", extensions_dir);
+    physx_dir[sizeof(physx_dir) - 1] = 0;
+    CreateDirectoryA(physx_dir, NULL);
+
+    _snprintf(out, outsz - 1, "%s\\Config.ini", physx_dir);
+    out[outsz - 1] = 0;
+    if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES) return;
+
+    resource = FindResourceA(self_module,
+                             MAKEINTRESOURCEA(PHYSX_DEFAULT_CONFIG_RESOURCE_ID),
+                             RT_RCDATA);
+    if (!resource) return;
+    default_size = SizeofResource(self_module, resource);
+    loaded_resource = LoadResource(self_module, resource);
+    default_data = loaded_resource ? LockResource(loaded_resource) : NULL;
+    if (!default_data || default_size == 0) return;
+
+    file = CreateFileA(out, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    WriteFile(file, default_data, default_size, &written, NULL);
+    CloseHandle(file);
 }
 
 static void sibling_file_path(const char *filename, char *out, size_t outsz)
 {
     out[0] = 0;
-    if (config_path[0]) {
-        lstrcpynA(out, config_path, (int)outsz);
-        {
-            char *slash = strrchr(out, '\\');
-            if (slash) slash[1] = 0;
-            else out[0] = 0;
-        }
-    } else if (self_module) {
+    if (self_module) {
         GetModuleFileNameA(self_module, out, (DWORD)outsz);
         {
             char *slash = strrchr(out, '\\');
@@ -4276,16 +4383,33 @@ static void resolve_engine_symbols(void)
     if (engine_symbols_attempted && engine_FindObjC &&
         engine_GetModelViewRotationPivot &&
         real_AppTracker_SetWorldMatrixInverse &&
+        tramp_PoseEdit_UpdateObjectsFromTracks &&
         tramp_AppBase_ProcessAnimation &&
         tramp_RuntimeRotationVectorWrite &&
         tramp_RuntimeJointRotationAxisWrite &&
         runtime_animation_member_setters_installed &&
+        runtime_blendcontrol_weight_setter_installed &&
         addon_constraint_count_getter_installed &&
         engine_StringRefHash32 && engine_NameHashFind) return;
     sys = GetModuleHandleA("ThriXXX010278-SYS.dll");
     app = GetModuleHandleA("ThriXXX010278-APP.dll");
     if (!sys && !app) return;
     engine_symbols_attempted = 1;
+    if (!tramp_PoseEdit_UpdateObjectsFromTracks &&
+        ptr_executable(POSEEDIT_UPDATE_OBJECTS_FROM_TRACKS_ADDR)) {
+        if (install_inline_hook(
+                POSEEDIT_UPDATE_OBJECTS_FROM_TRACKS_ADDR,
+                (void*)hook_PoseEdit_UpdateObjectsFromTracks,
+                5,
+                (void**)&tramp_PoseEdit_UpdateObjectsFromTracks)) {
+            log_line("PoseEditor UpdateObjectsFromTracks hook installed target=%p trampoline=%p note=\"post-track consumer overlays run after active pose animation; ordinary PoseEditor tracks remain unchanged\"",
+                     POSEEDIT_UPDATE_OBJECTS_FROM_TRACKS_ADDR,
+                     (void*)tramp_PoseEdit_UpdateObjectsFromTracks);
+        } else {
+            log_line("PoseEditor UpdateObjectsFromTracks hook not-installed target=%p reason=\"inline patch failed\"",
+                     POSEEDIT_UPDATE_OBJECTS_FROM_TRACKS_ADDR);
+        }
+    }
     if (app) {
         engine_FindObjC = (app_find_objc_t)GetProcAddress(app, "?FindObjC@AppMain@@YAPAVScriptObject@Bionic@@PBD@Z");
         engine_AppMainEngine = (app_engine_t)GetProcAddress(app, "?Engine@AppMain@@YAPAVScriptEngine@Bionic@@XZ");
@@ -4412,6 +4536,17 @@ static void resolve_engine_symbols(void)
                 "?GetModelViewRotationPivot@Bionic@@YAXPAVScriptObject@1@AAVVector3f@1@@Z");
         engine_GetWeakObjTarget = (get_weak_obj_target_t)GetProcAddress(sys, "?GetWeakObjTarget@Abstract@Bionic@@QBEPBVWeakObjTarget@2@XZ");
         if (!engine_GetWeakObjTarget) engine_GetWeakObjTarget = (get_weak_obj_target_t)GetProcAddress(sys, (LPCSTR)1618);
+        engine_ObjectGetTypeInfo = engine_ObjectGetTypeInfo ?
+            engine_ObjectGetTypeInfo :
+            (object_get_type_info_t)GetProcAddress(
+                sys, "?GetTypeInfo@Object@Bionic@@QBEPBVTypeInfo@2@XZ");
+        if (!engine_BlendControlTypeInfo) {
+            static_get_type_info_t get_type_info =
+                (static_get_type_info_t)GetProcAddress(
+                    sys,
+                    "?GetBlendControlTypeInfo@BlendControl@Bionic@@SAPBVTypeInfo@2@XZ");
+            if (get_type_info) engine_BlendControlTypeInfo = get_type_info();
+        }
         engine_ScriptObjectGetIndexScriptObject = (script_get_index_scriptobject_t)GetProcAddress(sys, "?Get@ScriptObject@Bionic@@QBEXPBVClassMember_Index_ScriptObject@2@AAV?$Array@V?$Obj@VScriptObject@Bionic@@@Bionic@@@2@@Z");
         if (!engine_ScriptObjectGetIndexScriptObject) engine_ScriptObjectGetIndexScriptObject = (script_get_index_scriptobject_t)GetProcAddress(sys, (LPCSTR)1237);
         engine_TBaseTransformGetMatrixVersion = engine_TBaseTransformGetMatrixVersion ?
@@ -8324,6 +8459,10 @@ static int suppress_poseeditor_testicle_tip_track_for_person(
         *engine_G_NilWeakObjTarget_ptr : NULL;
     void *null_array = engine_G_NullArray_ptr ?
         *engine_G_NullArray_ptr : NULL;
+    int current_pose_rebind = 0;
+    void *current_track_obj = NULL;
+    void *current_track_data = NULL;
+    double current_frame = 0.0;
     DWORD old;
 
     if (!testicle_physics_cfg.override_animation ||
@@ -8360,15 +8499,32 @@ static int suppress_poseeditor_testicle_tip_track_for_person(
             *(void**)(saved_base + 0x24) == null_array) {
             return 1;
         }
-        state->pose_track_extra_suppressed[extra_index] = 0;
-        state->pose_track_extra_base[extra_index] = NULL;
-        state->pose_track_extra_saved_obj[extra_index] = NULL;
-        state->pose_track_extra_saved_track_data[extra_index] = NULL;
+        if (saved_base == base &&
+            ptr_readable(saved_base, POSEEDIT_TRACK_SIZE) &&
+            *(void**)(saved_base + 0x04) == nil_weak &&
+            *(void**)(saved_base + 0x24) != null_array) {
+            current_track_data = *(void**)(saved_base + 0x24);
+            if (!current_track_data ||
+                !ptr_readable((BYTE*)current_track_data - sizeof(int),
+                              sizeof(int))) {
+                return 0;
+            }
+            current_track_obj =
+                (state->pose_track_extra_saved_obj[extra_index] == joint_obj ||
+                 state->pose_track_extra_saved_obj[extra_index] == joint_raw) ?
+                    state->pose_track_extra_saved_obj[extra_index] : joint_obj;
+            current_pose_rebind = 1;
+        } else {
+            state->pose_track_extra_suppressed[extra_index] = 0;
+            state->pose_track_extra_base[extra_index] = NULL;
+            state->pose_track_extra_saved_obj[extra_index] = NULL;
+            state->pose_track_extra_saved_track_data[extra_index] = NULL;
+        }
     }
-    if (!base ||
+    if (!current_pose_rebind && (!base ||
         !ptr_readable(base, POSEEDIT_TRACK_SIZE) ||
         (!validate_poseeditor_track_slot(base, joint_obj) &&
-         !validate_poseeditor_track_slot(base, joint_raw))) {
+         !validate_poseeditor_track_slot(base, joint_raw)))) {
         BYTE *found = find_poseedit_track_slot_by_object(
             person_index,
             POSEEDIT_TRACK_TESTICLES_JOINT02,
@@ -8385,10 +8541,10 @@ static int suppress_poseeditor_testicle_tip_track_for_person(
         }
         if (found) base = found;
     }
-    if (!base ||
+    if (!current_pose_rebind && (!base ||
         !ptr_readable(base, POSEEDIT_TRACK_SIZE) ||
         (!validate_poseeditor_track_slot(base, joint_obj) &&
-         !validate_poseeditor_track_slot(base, joint_raw))) {
+         !validate_poseeditor_track_slot(base, joint_raw)))) {
         if (!state->pose_track_extra_logged) {
             state->pose_track_extra_logged = 1;
             log_line("testicle-physics poseeditor-tip-track mismatch person=\"%s\" person_index=%d track_id=%d base=%p slot_obj=%p expected_obj=%p expected_raw=%p note=\"testicles_joint02 tip track was not modified\"",
@@ -8402,12 +8558,18 @@ static int suppress_poseeditor_testicle_tip_track_for_person(
         }
         return 0;
     }
+    if (current_pose_rebind &&
+        (!poseedit_current_frame(&current_frame) ||
+         !poseedit_track_apply_zero(base, current_track_obj,
+                                    current_frame))) {
+        return 0;
+    }
     if (VirtualProtect(base, POSEEDIT_TRACK_SIZE, PAGE_READWRITE, &old)) {
         state->pose_track_extra_base[extra_index] = base;
-        state->pose_track_extra_saved_obj[extra_index] =
-            *(void**)(base + 0x04);
+        state->pose_track_extra_saved_obj[extra_index] = current_pose_rebind ?
+            current_track_obj : *(void**)(base + 0x04);
         state->pose_track_extra_saved_track_data[extra_index] =
-            *(void**)(base + 0x24);
+            current_pose_rebind ? current_track_data : *(void**)(base + 0x24);
         *(void**)(base + 0x04) = nil_weak;
         *(void**)(base + 0x24) = null_array;
         VirtualProtect(base, POSEEDIT_TRACK_SIZE, old, &old);
@@ -8436,6 +8598,10 @@ static int suppress_poseeditor_testicle_track_for_person(
         *engine_G_NilWeakObjTarget_ptr : NULL;
     void *null_array = engine_G_NullArray_ptr ?
         *engine_G_NullArray_ptr : NULL;
+    int current_pose_rebind = 0;
+    void *current_track_obj = NULL;
+    void *current_track_data = NULL;
+    double current_frame = 0.0;
     DWORD old;
 
     if (!testicle_physics_cfg.override_animation ||
@@ -8470,15 +8636,32 @@ static int suppress_poseeditor_testicle_track_for_person(
             return suppress_poseeditor_testicle_tip_track_for_person(
                 person_index, person, state);
         }
-        state->pose_track_suppressed = 0;
-        state->pose_track_base = NULL;
-        state->pose_track_saved_obj = NULL;
-        state->pose_track_saved_track_data = NULL;
+        if (saved_base == base &&
+            ptr_readable(saved_base, POSEEDIT_TRACK_SIZE) &&
+            *(void**)(saved_base + 0x04) == nil_weak &&
+            *(void**)(saved_base + 0x24) != null_array) {
+            current_track_data = *(void**)(saved_base + 0x24);
+            if (!current_track_data ||
+                !ptr_readable((BYTE*)current_track_data - sizeof(int),
+                              sizeof(int))) {
+                return 0;
+            }
+            current_track_obj =
+                (state->pose_track_saved_obj == joint_obj ||
+                 state->pose_track_saved_obj == joint_raw) ?
+                    state->pose_track_saved_obj : joint_obj;
+            current_pose_rebind = 1;
+        } else {
+            state->pose_track_suppressed = 0;
+            state->pose_track_base = NULL;
+            state->pose_track_saved_obj = NULL;
+            state->pose_track_saved_track_data = NULL;
+        }
     }
-    if (!base ||
+    if (!current_pose_rebind && (!base ||
         !ptr_readable(base, POSEEDIT_TRACK_SIZE) ||
         (!validate_poseeditor_track_slot(base, joint_obj) &&
-         !validate_poseeditor_track_slot(base, joint_raw))) {
+         !validate_poseeditor_track_slot(base, joint_raw)))) {
         BYTE *found = find_poseedit_track_slot_by_object(
             person_index,
             POSEEDIT_TRACK_TESTICLES_JOINT01,
@@ -8495,10 +8678,10 @@ static int suppress_poseeditor_testicle_track_for_person(
         }
         if (found) base = found;
     }
-    if (!base ||
+    if (!current_pose_rebind && (!base ||
         !ptr_readable(base, POSEEDIT_TRACK_SIZE) ||
         (!validate_poseeditor_track_slot(base, joint_obj) &&
-         !validate_poseeditor_track_slot(base, joint_raw))) {
+         !validate_poseeditor_track_slot(base, joint_raw)))) {
         if (!state->pose_track_logged) {
             state->pose_track_logged = 1;
             log_line("testicle-physics poseeditor-track mismatch person=\"%s\" person_index=%d track_id=%d base=%p slot_obj=%p expected_obj=%p expected_raw=%p note=\"testicles_joint01 track was not modified\"",
@@ -8512,10 +8695,18 @@ static int suppress_poseeditor_testicle_track_for_person(
         }
         return 0;
     }
+    if (current_pose_rebind &&
+        (!poseedit_current_frame(&current_frame) ||
+         !poseedit_track_apply_zero(base, current_track_obj,
+                                    current_frame))) {
+        return 0;
+    }
     if (VirtualProtect(base, POSEEDIT_TRACK_SIZE, PAGE_READWRITE, &old)) {
         state->pose_track_base = base;
-        state->pose_track_saved_obj = *(void**)(base + 0x04);
-        state->pose_track_saved_track_data = *(void**)(base + 0x24);
+        state->pose_track_saved_obj = current_pose_rebind ?
+            current_track_obj : *(void**)(base + 0x04);
+        state->pose_track_saved_track_data = current_pose_rebind ?
+            current_track_data : *(void**)(base + 0x24);
         *(void**)(base + 0x04) = nil_weak;
         *(void**)(base + 0x24) = null_array;
         VirtualProtect(base, POSEEDIT_TRACK_SIZE, old, &old);
@@ -10417,6 +10608,7 @@ static void physx_tick(void)
 #include "physx_hooks_core.c"
 #include "physx_collider_draw.c"
 #include "physx_render_hooks.c"
+#include "physx_public_api.c"
 
 __declspec(dllexport) int loadextension(void)
 {
@@ -10424,6 +10616,7 @@ __declspec(dllexport) int loadextension(void)
     resolve_engine_symbols();
     patch_all_modules();
     patch_config_editor_param_change();
+    patch_config_editor_spinbox_sync();
     patch_person_context_rebuild();
     patch_app_main_command();
     scan_sidecars(GetTickCount());
@@ -10437,6 +10630,7 @@ __declspec(dllexport) int on_create(void)
     resolve_engine_symbols();
     patch_all_modules();
     patch_config_editor_param_change();
+    patch_config_editor_spinbox_sync();
     patch_person_context_rebuild();
     patch_app_main_command();
     scan_sidecars(GetTickCount());
@@ -10446,7 +10640,6 @@ __declspec(dllexport) int on_create(void)
 
 BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 {
-    (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         self_module = hinst;
         plugin_attach_tick = GetTickCount();
@@ -10457,6 +10650,19 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
         log_line("NC-TK17-PhysX.dll attached");
         load_global_config();
     } else if (reason == DLL_PROCESS_DETACH) {
+        /*
+         * A non-NULL reserved value means Windows is terminating the process.
+         * At that point TK17 may already have run DeleteMasterCVTBL(), so the
+         * object lookups used by the manual reset routines are no longer
+         * valid. Windows is about to reclaim every plugin allocation anyway.
+         *
+         * Keep the full cleanup below for a real FreeLibrary unload, where
+         * reserved is NULL and the game continues running.
+         */
+        if (reserved != NULL) {
+            log_ready = 0;
+            return TRUE;
+        }
         camera_contamination_test_release_mouse();
         InterlockedExchange(&camera_contamination_test_cfg.active, 0);
         restore_collision_auto_test_active();

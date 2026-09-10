@@ -99,7 +99,7 @@ See [the plugin review](docs/PLUGIN-REVIEW.md) for remaining engineering work.
 
 ## Configuration
 
-Global settings are read from `NC-TK17-PhysX.ini`. Body and addon-specific `.physx.ini` sidecars can override relevant settings and are reloaded when changed. Some global controls are also available through the in-game configuration editor.
+Global settings are read from `Extensions/PhysX/Config.ini`. The plugin creates the `Extensions/PhysX` directories and writes its documented default configuration when the file is missing. Body and addon-specific `.physx.ini` sidecars can override relevant settings and are reloaded when changed. Some global controls are also available through the in-game configuration editor.
 
 For troubleshooting, check `Logs/NC-TK17-PhysX.log` and enable debug options only when needed, as verbose diagnostics can generate substantial output.
 
