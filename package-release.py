@@ -13,6 +13,7 @@ files = {
     'docs/GRAVITY-SAMPLING.md': root / 'docs/GRAVITY-SAMPLING.md',
     'docs/SINGLE-BONE-CONTACT.md': root / 'docs/SINGLE-BONE-CONTACT.md',
     'docs/BODY-COLLISION-CAMERA.md': root / 'docs/BODY-COLLISION-CAMERA.md',
+    'docs/PERFORMANCE-WIND.md': root / 'docs/PERFORMANCE-WIND.md',
 }
 payload = {name: path.read_bytes() for name, path in files.items()}
 dll = payload['Binaries/NC-TK17-PhysX.dll']

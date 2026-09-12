@@ -1,3 +1,16 @@
+# Code performance and continuous wind - 2026-09-12
+
+- Added validated positive lookup hints for addon/equipment registries and
+  removed unused activation queries and gravity-only report calculations.
+- Reused wind phase/sample calculations and shared chain sway; skipped sine
+  evaluations when turbulence is zero.
+- Removed the hourly wind phase reset and improved clock precision while
+  retaining existing wind settings and body/clothing/room response mappings.
+- Ten existing regression suites and two new differential suites pass; the DLL
+  builds. In-game behavior and FPS validation of this build are pending.
+- Details, isolated timing results and rollback location:
+  [PERFORMANCE-WIND.md](docs/PERFORMANCE-WIND.md).
+
 # Breast/butt contacts and body collision camera fix - 2026-09-10
 
 - Replaced breast/butt summed collision offsets with bounded translation

@@ -40,3 +40,6 @@ build/single_bone_contact_test.exe
 build/*.single-bone.diff
 build/collision_frame_test.c
 build/collision_frame_test.exe
+
+build/before-wind-optimization/
+build/optimization-tests/

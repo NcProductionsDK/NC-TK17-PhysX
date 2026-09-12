@@ -4553,17 +4553,44 @@ static int sidecar_addon_identifier(physx_sidecar_t *sc,
     return out[0] != 0;
 }
 
+/* Positive lookup hints only: a reused slot must still match both live keys.
+   Tables are packed on insertion and their keys are only replaced by these
+   find/create functions. Hook threads keep independent hints. */
+static unsigned int addon_lookup_hint_index(const char *a, const char *b)
+{
+    unsigned int hash = 2166136261u;
+    const unsigned char *p;
+    int key;
+    for (key = 0; key < 2; key++) {
+        p = (const unsigned char *)(key ? b : a);
+        while (p && *p) {
+            unsigned int c = *p++;
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            hash = (hash ^ c) * 16777619u;
+        }
+        hash = (hash ^ 0xffu) * 16777619u;
+    }
+    return hash & 63u;
+}
+
 static addon_equipment_definition_t *addon_equipment_definition_find(
     const char *addon_id, int create)
 {
+    static __thread addon_equipment_definition_t *hints[64];
+    addon_equipment_definition_t *hint;
+    unsigned int hint_index;
     addon_equipment_definition_t *empty = NULL;
     int i;
     if (!addon_id || !addon_id[0]) return NULL;
+    hint_index = addon_lookup_hint_index(addon_id, NULL);
+    hint = hints[hint_index];
+    if (hint && _stricmp(hint->addon_id, addon_id) == 0) return hint;
     for (i = 0; i < ADDON_EQUIPMENT_DEFINITION_COUNT; i++) {
         addon_equipment_definition_t *definition =
             &addon_equipment_definitions[i];
         if (definition->addon_id[0] &&
             _stricmp(definition->addon_id, addon_id) == 0) {
+            hints[hint_index] = definition;
             return definition;
         }
         if (!definition->addon_id[0]) {
@@ -4574,6 +4601,7 @@ static addon_equipment_definition_t *addon_equipment_definition_find(
     if (!create || !empty) return NULL;
     memset(empty, 0, sizeof(*empty));
     lstrcpynA(empty->addon_id, addon_id, sizeof(empty->addon_id));
+    hints[hint_index] = empty;
     return empty;
 }
 
@@ -4654,17 +4682,25 @@ static int addon_equipment_definitions_overlap(
 static addon_equipment_slot_t *addon_equipment_slot_find(
     const char *owner, const char *zone, int create)
 {
+    static __thread addon_equipment_slot_t *hints[64];
+    addon_equipment_slot_t *hint;
+    unsigned int hint_index;
     addon_equipment_slot_t *empty = NULL;
     addon_equipment_slot_t *oldest = NULL;
     DWORD oldest_age = 0;
     DWORD now = GetTickCount();
     int i;
     if (!owner || !owner[0] || !zone || !zone[0]) return NULL;
+    hint_index = addon_lookup_hint_index(owner, zone);
+    hint = hints[hint_index];
+    if (hint && _stricmp(hint->owner, owner) == 0 &&
+        _stricmp(hint->zone, zone) == 0) return hint;
     for (i = 0; i < ADDON_EQUIPMENT_SLOT_COUNT; i++) {
         addon_equipment_slot_t *slot = &addon_equipment_slots[i];
         if (slot->owner[0] && slot->zone[0] &&
             _stricmp(slot->owner, owner) == 0 &&
             _stricmp(slot->zone, zone) == 0) {
+            hints[hint_index] = slot;
             return slot;
         }
         if (!slot->owner[0]) {
@@ -4683,6 +4719,7 @@ static addon_equipment_slot_t *addon_equipment_slot_find(
     memset(empty, 0, sizeof(*empty));
     lstrcpynA(empty->owner, owner, sizeof(empty->owner));
     lstrcpynA(empty->zone, zone, sizeof(empty->zone));
+    hints[hint_index] = empty;
     return empty;
 }
 
@@ -4799,17 +4836,25 @@ static addon_active_slot_t *addon_active_slot_find(const char *owner,
                                                     const char *addon_id,
                                                     int create)
 {
+    static __thread addon_active_slot_t *hints[64];
+    addon_active_slot_t *hint;
+    unsigned int hint_index;
     addon_active_slot_t *empty = NULL;
     addon_active_slot_t *oldest = NULL;
     DWORD oldest_age = 0;
     DWORD now = GetTickCount();
     int i;
     if (!owner || !owner[0] || !addon_id || !addon_id[0]) return NULL;
+    hint_index = addon_lookup_hint_index(owner, addon_id);
+    hint = hints[hint_index];
+    if (hint && _stricmp(hint->owner, owner) == 0 &&
+        _stricmp(hint->addon_id, addon_id) == 0) return hint;
     for (i = 0; i < ADDON_ACTIVE_SLOT_COUNT; i++) {
         addon_active_slot_t *entry = &addon_active_slots[i];
         if (entry->owner[0] && entry->addon_id[0] &&
             _stricmp(entry->owner, owner) == 0 &&
             _stricmp(entry->addon_id, addon_id) == 0) {
+            hints[hint_index] = entry;
             return entry;
         }
         if (!entry->owner[0] && !empty) empty = entry;
@@ -4825,6 +4870,7 @@ static addon_active_slot_t *addon_active_slot_find(const char *owner,
     memset(empty, 0, sizeof(*empty));
     lstrcpynA(empty->owner, owner, sizeof(empty->owner));
     lstrcpynA(empty->addon_id, addon_id, sizeof(empty->addon_id));
+    hints[hint_index] = empty;
     return empty;
 }
 
@@ -11601,7 +11647,6 @@ static int addon_chain_owner_body_ready(physx_sidecar_t *sc,
     if (!owner[0]) return 0;
     if (epsilon < 0.0001f) epsilon = 0.0001f;
     if (addon_body_root_pointer_for_person(owner, &root_raw, &root) && root) {
-        root_len = physx_vec3_len(root);
         if (chain->addon_scene_visible &&
             chain->addon_body_root_raw &&
             chain->addon_body_root_raw != root_raw) {
@@ -11624,6 +11669,7 @@ static int addon_chain_owner_body_ready(physx_sidecar_t *sc,
             chain->addon_body_root_raw == root_raw) {
             return 1;
         }
+        root_len = physx_vec3_len(root);
         if (!physics_environment_cfg.gravity_probe_require_nonzero_root ||
             root_len > epsilon) {
             /* Add-on readiness must exist even when the wearer's body profile
@@ -11657,7 +11703,7 @@ static int addon_chain_scene_visible(physx_sidecar_t *sc,
                                      int *live_targets_out,
                                      int *writable_targets_out)
 {
-    int poseedit_visible = addon_output_scene_visible();
+    int poseedit_visible;
     int owner_person_index = sc ?
         addon_person_prefix_to_index(sc->addon_owner_person) : -1;
     int live_targets = 0;
@@ -11716,6 +11762,7 @@ static int addon_chain_scene_visible(physx_sidecar_t *sc,
         if (runtime_fallback_out) *runtime_fallback_out = 1;
         return 1;
     }
+    poseedit_visible = addon_output_scene_visible();
     if (owner_person_index >= 0 && owner_person_index < 4) {
         /* PoseEdit's person slots can remain allocated in Freemode, Quick
            Mode, Sequencer, and Story Mode and intermittently report hidden.
@@ -16685,21 +16732,23 @@ static void run_chain_simulations(DWORD now)
                     }
                     if (addon_local_bend) {
                         if (addon_world_gravity_valid) {
-                            /* Retain the gravity-only sample for the existing
-                               diagnostic report; simulation uses the combined
-                               resultant below. */
-                            addon_gravity_bend_valid =
-                                addon_chain_world_gravity_bend_vector(
-                                    chain, target,
-                                    addon_world_gravity_drive,
-                                    addon_gravity_bend);
-                            if (target->gravity_inverted_configured) {
+                            /* Simulation maps the combined force below. Only
+                               compute the separate report sample when consumed. */
+                            if (defaults_cfg.debug ||
+                                addon_gravity_diag_enabled(chain)) {
                                 addon_gravity_bend_valid =
-                                    addon_chain_apply_inverted_gravity_bend(
+                                    addon_chain_world_gravity_bend_vector(
                                         chain, target,
                                         addon_world_gravity_drive,
-                                        1.0f,
                                         addon_gravity_bend);
+                                if (target->gravity_inverted_configured) {
+                                    addon_gravity_bend_valid =
+                                        addon_chain_apply_inverted_gravity_bend(
+                                            chain, target,
+                                            addon_world_gravity_drive,
+                                            1.0f,
+                                            addon_gravity_bend);
+                                }
                             }
                             for (axis = 0; axis < 3; axis++) {
                                 addon_force_drive[axis] +=

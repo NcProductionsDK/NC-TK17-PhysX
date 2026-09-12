@@ -1,3 +1,7 @@
+#include "physx_wind.h"
+
+static physx_wind_state_t room_wind_state;
+
 #define ROOM_WIND_SIDECAR_COUNT 64
 
 typedef struct room_wind_sidecar_t {
@@ -507,64 +511,22 @@ static float room_wind_hashed_strength(const char *owner_name,
                                        float sway_frequency,
                                        DWORD now)
 {
-    const float two_pi = 6.2831853071795864769f;
-    unsigned int hash = 2166136261u;
-    float unit;
-    float signed_unit;
-    float phase;
-    float seconds;
-    float frequency_scale;
-    float sway_phase;
-    float sway_frequency_scale;
-    float gust = 0.0f;
-    float turbulence;
-    float individual;
-    float amplitude;
-    float sway = 0.0f;
-    if (!room_wind_is_enabled() || wind_scale <= 0.000001f) {
-        return 0.0f;
-    }
-    hash = room_wind_hash_add(hash, owner_name);
-    hash = room_wind_hash_add(hash, system_name);
-    /* Every target in one chain shares a slow phase so the trunk bends as a
-       unit. Target hashing below still varies gusts and turbulence. */
-    sway_phase = ((float)(hash & 0xffffu) / 65535.0f) * two_pi;
-    sway_frequency_scale = 0.94f +
-        ((float)((hash >> 16) & 0xffu) / 255.0f) * 0.12f;
-    hash = room_wind_hash_add(hash, target_name);
-    unit = (float)(hash & 0xffffu) / 65535.0f;
-    signed_unit = unit * 2.0f - 1.0f;
-    phase = unit * two_pi;
-    seconds = (float)(now % 3600000u) * 0.001f;
-    frequency_scale = 0.85f +
-        ((float)((hash >> 16) & 0xffu) / 255.0f) * 0.30f;
-    if (room_wind_cfg.gust_frequency > 0.000001f &&
-        room_wind_cfg.gust_strength > 0.000001f) {
-        gust = room_wind_cfg.gust_strength *
-            (0.5f + 0.5f * (float)sin((double)(
-                seconds * two_pi * room_wind_cfg.gust_frequency *
-                frequency_scale + phase)));
-    }
-    turbulence = room_wind_cfg.turbulence *
-        (0.65f * (float)sin((double)(
-            seconds * two_pi *
-            (0.37f + room_wind_cfg.gust_frequency * 1.70f) *
-            frequency_scale + phase * 1.73f)) +
-         0.35f * (float)sin((double)(
-            seconds * two_pi *
-            (0.83f + room_wind_cfg.gust_frequency * 2.90f) *
-            (1.15f - (frequency_scale - 0.85f)) + phase * 2.41f)));
-    individual = 1.0f + room_wind_cfg.variation * signed_unit;
-    amplitude = room_wind_cfg.strength * wind_scale * individual *
-                (1.0f + gust + turbulence);
-    if (sway_strength > 0.000001f && sway_frequency > 0.000001f) {
-        /* Unlike gusts, this contribution is signed. It can move a flexible
-           room chain through rest for genuine back-and-forth motion. */
-        sway = sway_strength * wind_scale * individual *
-            (float)sin((double)(seconds * two_pi * sway_frequency *
-                                sway_frequency_scale + sway_phase));
-    }
-    return physx_clampf(amplitude + sway, -20.0f, 20.0f);
+    unsigned int chain_hash, target_hash;
+    physx_wind_parameters_t parameters;
+    if (!room_wind_is_enabled() || wind_scale <= 0.000001f) return 0.0f;
+    chain_hash = room_wind_hash_add(2166136261u, owner_name);
+    chain_hash = room_wind_hash_add(chain_hash, system_name);
+    target_hash = room_wind_hash_add(chain_hash, target_name);
+    parameters.strength = room_wind_cfg.strength;
+    parameters.turbulence = room_wind_cfg.turbulence;
+    parameters.gust_strength = room_wind_cfg.gust_strength;
+    parameters.gust_frequency = room_wind_cfg.gust_frequency;
+    parameters.variation = room_wind_cfg.variation;
+    parameters.wind_scale = wind_scale;
+    parameters.sway_strength = sway_strength;
+    parameters.sway_frequency = sway_frequency;
+    return physx_wind_sample(&room_wind_state, chain_hash, target_hash,
+                              &parameters, now);
 }
 
 static float room_wind_body_strength(const char *person,
