@@ -10558,6 +10558,8 @@ static void reset_butt_physics_all(int restore_output);
 #include "physx_butt.c"
 #include "physx_room_wind.c"
 #include "physx_room_collision.c"
+#define PHYSX_FAULT_TRACE_ENABLED (defaults_cfg.debug)
+#include "physx_fault_trace.h"
 #include "physx_sidecar.c"
 
 static void physx_tick(void)
@@ -10703,7 +10705,18 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
         log_ready = 1;
         log_line("NC-TK17-PhysX.dll attached");
         load_global_config();
+        if(defaults_cfg.debug) {
+            char trace_path[MAX_PATH*4],*slash;
+            GetModuleFileNameA(hinst,trace_path,sizeof(trace_path));
+            slash=strrchr(trace_path,'\\');
+            if(slash) {
+                slash[1]=0;
+                lstrcatA(trace_path,"..\\Logs\\NC-TK17-PhysX-fault.log");
+                physx_fault_trace_start(trace_path);
+            }
+        }
     } else if (reason == DLL_PROCESS_DETACH) {
+        if(reserved==NULL) physx_fault_trace_stop();
         /*
          * A non-NULL reserved value means Windows is terminating the process.
          * At that point TK17 may already have run DeleteMasterCVTBL(), so the

@@ -1,0 +1,54 @@
+FIRST-CHANCE exception=c0000005 tick=271101046 thread=2452 stage=test-pivot raw=00005678 object=00009ABC
+fault_pc=75ceaed4 module=C:\Windows\System32\KERNELBASE.dll base=75b80000 rva=0016aed4
+exception_parameter[0]=00000000
+exception_parameter[1]=00001234
+eax=00bffd20 ebx=00bffdb0 ecx=00000002 edx=00000000 esi=01381658 edi=01381590 ebp=00bffd7c esp=00bffd20 eip=75ceaed4
+stack_word[0]=c0000005 module= base=00000000 rva=00000000
+stack_word[1]=00000000 module= base=00000000 rva=00000000
+stack_word[2]=00000000 module= base=00000000 rva=00000000
+stack_word[3]=75ceaed4 module=C:\Windows\System32\KERNELBASE.dll base=75b80000 rva=0016aed4
+stack_word[4]=00000002 module= base=00000000 rva=00000000
+stack_word[5]=00000000 module= base=00000000 rva=00000000
+stack_word[6]=00001234 module= base=00000000 rva=00000000
+stack_word[7]=772d9114 module=C:\Windows\SYSTEM32\ntdll.dll base=771a0000 rva=00139114
+stack_word[8]=00bffd70 module= base=00000000 rva=00000000
+stack_word[9]=771e55da module=C:\Windows\SYSTEM32\ntdll.dll base=771a0000 rva=000455da
+stack_word[10]=771d5925 module=C:\Windows\SYSTEM32\ntdll.dll base=771a0000 rva=00035925
+stack_word[11]=772dd3cc module=C:\Windows\SYSTEM32\ntdll.dll base=771a0000 rva=0013d3cc
+stack_word[12]=00df7ef0 module= base=00000000 rva=00000000
+stack_word[13]=772dd3c8 module=C:\Windows\SYSTEM32\ntdll.dll base=771a0000 rva=0013d3c8
+stack_word[14]=771cd8bf module=C:\Windows\SYSTEM32\ntdll.dll base=771a0000 rva=0002d8bf
+stack_word[15]=01381590 module= base=00000000 rva=00000000
+stack_word[16]=01381658 module= base=00000000 rva=00000000
+stack_word[17]=771cd740 module=C:\Windows\SYSTEM32\ntdll.dll base=771a0000 rva=0002d740
+stack_word[18]=00000001 module= base=00000000 rva=00000000
+stack_word[19]=00000001 module= base=00000000 rva=00000000
+stack_word[20]=00bffd7c module= base=00000000 rva=00000000
+stack_word[21]=06b5fb6d module= base=00000000 rva=00000000
+stack_word[22]=00000000 module= base=00000000 rva=00000000
+stack_word[23]=00bffdd0 module= base=00000000 rva=00000000
+stack_word[24]=004d2f99 module=C:\Users\ErolB\Desktop\Games\TK17\Development\NC-TK17-PhysX\build\fault_trace_test.exe base=004d0000 rva=00002f99
+stack_word[25]=c0000005 module= base=00000000 rva=00000000
+stack_word[26]=00000000 module= base=00000000 rva=00000000
+stack_word[27]=00000002 module= base=00000000 rva=00000000
+stack_word[28]=00bffdb0 module= base=00000000 rva=00000000
+stack_word[29]=00000002 module= base=00000000 rva=00000000
+stack_word[30]=00000080 module= base=00000000 rva=00000000
+stack_word[31]=00000000 module= base=00000000 rva=00000000
+stack_word[32]=00000000 module= base=00000000 rva=00000000
+stack_word[33]=004d1a20 module=C:\Users\ErolB\Desktop\Games\TK17\Development\NC-TK17-PhysX\build\fault_trace_test.exe base=004d0000 rva=00001a20
+stack_word[34]=00bffd94 module= base=00000000 rva=00000000
+stack_word[35]=00df7ff0 module= base=00000000 rva=00000000
+stack_word[36]=00000000 module= base=00000000 rva=00000000
+stack_word[37]=00001234 module= base=00000000 rva=00000000
+stack_word[38]=f1a180ba module= base=00000000 rva=00000000
+stack_word[39]=fffffffe module= base=00000000 rva=00000000
+stack_word[40]=00bffde0 module= base=00000000 rva=00000000
+stack_word[41]=004d1b30 module=C:\Users\ErolB\Desktop\Games\TK17\Development\NC-TK17-PhysX\build\fault_trace_test.exe base=004d0000 rva=00001b30
+stack_word[42]=00000000 module= base=00000000 rva=00000000
+stack_word[43]=01381590 module= base=00000000 rva=00000000
+stack_word[44]=00bffe28 module= base=00000000 rva=00000000
+stack_word[45]=004d10fc module=C:\Users\ErolB\Desktop\Games\TK17\Development\NC-TK17-PhysX\build\fault_trace_test.exe base=004d0000 rva=000010fc
+stack_word[46]=004d1b30 module=C:\Users\ErolB\Desktop\Games\TK17\Development\NC-TK17-PhysX\build\fault_trace_test.exe base=004d0000 rva=00001b30
+stack_word[47]=004d10fc module=C:\Users\ErolB\Desktop\Games\TK17\Development\NC-TK17-PhysX\build\fault_trace_test.exe base=004d0000 rva=000010fc
+END FIRST-CHANCE (may be handled by the game; this observer does not recover faults)

@@ -12157,6 +12157,8 @@ static int addon_chain_view_to_body_local(
                                              out);
 }
 
+#include "physx_addon_pivot.h"
+
 static int addon_chain_target_body_local(physx_sidecar_t *sc,
                                          physx_chain_t *chain,
                                          physx_target_t *target,
@@ -12192,7 +12194,22 @@ static int addon_chain_target_body_local(physx_sidecar_t *sc,
     if (engine_GetModelViewRotationPivot &&
         target->object &&
         !is_nil_engine_object(target->raw_object, target->object)) {
-        engine_GetModelViewRotationPivot(target->object, view);
+        void *pivot_object=addon_pivot_script_object(target->raw_object,target->object);
+        static unsigned int pivot_mapping_logs;
+        if(pivot_object!=target->object && defaults_cfg.debug && pivot_mapping_logs<32) {
+            pivot_mapping_logs++;
+            log_line("addon pivot ScriptObject selection target=\"%s\" raw=%p resolved=%p selected=%p result=%s note=\"resolved object lacks the pivot API script dispatch; use the validated raw binding or skip this sample\"",
+                target->name,target->raw_object,target->object,pivot_object,
+                pivot_object?"raw-script-object":"unavailable");
+        }
+        if(!pivot_object) return 0;
+        const char *previous_stage=physx_fault_stage;
+        const void *previous_raw=physx_fault_raw,*previous_object=physx_fault_object;
+        physx_fault_stage="addon-body-local-pivot";
+        physx_fault_raw=target->raw_object;physx_fault_object=pivot_object;
+        engine_GetModelViewRotationPivot(pivot_object, view);
+        physx_fault_stage=previous_stage;
+        physx_fault_raw=previous_raw;physx_fault_object=previous_object;
         if (sane_probe_float(view[0]) &&
             sane_probe_float(view[1]) &&
             sane_probe_float(view[2]) &&
