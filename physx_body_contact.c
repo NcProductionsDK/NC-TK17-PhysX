@@ -1,9 +1,12 @@
+#include "physx_collision_profile.h"
+
 /* Included by physx_colliders.c. Joint-space contact solve shared by the
    built-in penis and testicle chains. Corrections change pose, never momentum. */
 static int body_contact_predict(const body_chain_physics_config_t *cfg,
     const body_chain_person_state_t *state,const float base[4][3],
     const float correction[3][2],float points[4][3])
 {
+    COLLISION_PROFILE_COUNT(CP_BODY_PREDICTIONS, 1);
     if(state->collision_step_valid && state->collision_pose_valid) {
         float euler[3][3];int j,a;
         for(j=0;j<3;j++) for(a=0;a<3;a++) {
@@ -100,10 +103,20 @@ static void body_contact_capture_step(body_chain_collider_person_state_t *collid
     float sampled[4][3];
     int engine=0;
     if (state->collision_step_valid && state->collision_step_tick==now) return;
-    /* Geometry also drives gravity/inertia when contact response is disabled. */
-    if (!collider->ready ||
-        !(testicle?body_chain_testicle_collision_points_local(collider,state,sampled,&engine,now):
+    /* Local chain geometry also drives gravity/inertia. Collision readiness
+       waits for the whole body/placement to settle and must not delay these
+       local dynamics or switch them off again during later camera movement. */
+    if (!(testicle?body_chain_testicle_collision_points_local(collider,state,sampled,&engine,now):
                    body_chain_collision_points_local(collider,state,sampled,&engine,now))) {
+        state->collision_step_valid=0;return;
+    }
+    /* Before collision promotion, only fit actual, current engine pivots in a
+       confirmed body frame. Never initialize dynamics from synthetic or held
+       points. Contact projection still checks collider->ready separately. */
+    if (!collider->ready &&
+        (!collider->basis_valid || engine!=1 || state->gravity_camera_hold_active ||
+         body_chain_camera_pivot_hold_active(now) ||
+         (testicle?collider->testicle_points_update_tick:collider->chain_points_update_tick)!=now)) {
         state->collision_step_valid=0;return;
     }
     body_contact_trace_pose(collider,state,cfg,testicle,now,sampled,engine);
@@ -179,6 +192,7 @@ static void body_contact_jacobian(const body_chain_physics_config_t *cfg,
     const float correction[3][2], const body_chain_contact_t *contact,
     const float direction[3], float jac[3][2], int respect_limits)
 {
+    COLLISION_PROFILE_COUNT(CP_BODY_JACOBIANS, 1);
     int j,a;
     memset(jac,0,sizeof(float)*6);
     for(j=0;j<=contact->segment;j++) for(a=0;a<2;a++) {
@@ -262,6 +276,7 @@ static void body_contact_refine_combined(const body_chain_physics_config_t *cfg,
     const body_chain_contact_t *contacts,int count,int segments,
     float cap,float radius,float relaxation,float correction[3][2])
 {
+    COLLISION_PROFILE_SCOPE(profile_refine, CP_BODY_REFINE);
     float points[4][3],error;int pass,c,j,a;
     body_contact_predict(cfg,state,base,correction,points);
     error=body_contact_overlap_error(points,contacts,count);
@@ -313,7 +328,9 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
     body_chain_person_state_t *state, const float base[4][3],
     body_chain_contact_t *contacts,int count,int segment_count,float correction[3][2])
 {
+    COLLISION_PROFILE_SCOPE(profile_solve, CP_BODY_SOLVE);
     float points[4][3];
+    float velocity_jacobians[BODY_CHAIN_MAX_CONTACTS][3][2];
     float position_impulse[BODY_CHAIN_MAX_CONTACTS]={0};
     float best_correction[3][2]={{0}};
     float best_error,initial_error,best_norm=0;
@@ -330,7 +347,10 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
     best_error=initial_error=body_contact_overlap_error(points,contacts,count);
     /* More than one support must constrain the same candidate. No joint is
        frozen merely because an earlier contact used it. */
+    COLLISION_PROFILE_COUNT(CP_BODY_CONTACTS, count);
+    COLLISION_PROFILE_SCOPE(profile_position, CP_BODY_POSITION);
     for(pass=0;pass<iterations;pass++) {
+        COLLISION_PROFILE_COUNT(CP_BODY_PASSES, 1);
         float largest=0;
         for(c=0;c<count;c++) {
             float p[3],jac[3][2],denom=0,depth,sep=0,lambda,next_lambda;
@@ -370,6 +390,7 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
         }
         if(largest<.00001f) break;
     }
+    COLLISION_PROFILE_END(profile_position);
     memcpy(correction,best_correction,sizeof(best_correction));
     body_contact_refine_combined(cfg,state,base,contacts,count,segment_count,
         cap,trust_radius,relaxation,correction);
@@ -378,9 +399,19 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
        correction/dt is deliberately absent: separation must not cause bounce.
        Free separation is untouched. Repeated passes restore all
        corner-support inequalities. */
+    COLLISION_PROFILE_SCOPE(profile_velocity, CP_BODY_VELOCITY);
     for(pass=0;pass<8;pass++) for(c=0;c<count;c++) {
         float jac[3][2],denom=0,vn=0,lambda;
-        body_contact_jacobian(cfg,state,base,correction,&contacts[c],contacts[c].normal,jac,0);
+        /* Only velocity changes during these eight passes. Angles, final
+           correction, contact normals and the sampled pose remain fixed, so
+           each contact's geometric Jacobian is identical on every pass.
+           Retain all passes, live velocity reads and joint-limit handling. */
+        if(pass==0) {
+            body_contact_jacobian(cfg,state,base,correction,&contacts[c],contacts[c].normal,jac,0);
+            memcpy(velocity_jacobians[c],jac,sizeof(jac));
+        } else {
+            memcpy(jac,velocity_jacobians[c],sizeof(jac));
+        }
         for(j=0;j<segment_count;j++) for(a=0;a<2;a++) {
             int axis=a?cfg->vertical_output_axis:cfg->horizontal_output_axis;
             denom+=jac[j][a]*jac[j][a]*body_contact_inverse_inertia(state,j,a);

@@ -1936,11 +1936,11 @@ static void migrate_legacy_penis_physics_section(void)
         "translation_depth_scale", "rotation_horizontal_scale",
         "rotation_vertical_scale", "rotation_twist_scale",
         "gravity_curve", "gravity_horizontal_curve",
-        "gravity_vertical_curve",
+        "gravity_vertical_curve", "gravity_horizontal_strength", "gravity_vertical_strength",
         "stiffness", "damping",
         "joint01_max_angle", "joint02_max_angle", "joint03_max_angle",
         "joint01_gain", "joint02_gain", "joint03_gain",
-        "interval_ms"
+        "interval_ms", "update_rate_hz"
     };
     char value[32];
     char *section_values;
@@ -2173,6 +2173,8 @@ static void body_profile_overlay_paired_physics_section(
         section, "joint01_gain", cfg->link_gain[0], path);
     cfg->interval_ms = GetPrivateProfileIntA(
         section, "interval_ms", cfg->interval_ms, path);
+    cfg->update_rate_hz = body_update_clamp_rate((int)GetPrivateProfileIntA(
+        section, "update_rate_hz", cfg->update_rate_hz, path));
 
     body_profile_clamp_current_physics_config(cfg, 1);
     cfg->bone_translation_stiffness = physx_clampf(
@@ -2289,6 +2291,12 @@ static void body_profile_overlay_body_physics_sections(int person_index,
     body_chain_physics_cfg.gravity_angle =
         profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_angle",
                       body_chain_physics_cfg.gravity_angle, path);
+    body_chain_physics_cfg.gravity_horizontal_strength = physx_clampf(
+        profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_horizontal_strength",
+                      body_chain_physics_cfg.gravity_horizontal_strength, path), 0.0f, 4.0f);
+    body_chain_physics_cfg.gravity_vertical_strength = physx_clampf(
+        profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_vertical_strength",
+                      body_chain_physics_cfg.gravity_vertical_strength, path), 0.0f, 4.0f);
     body_chain_physics_cfg.gravity_horizontal_curve =
         profile_float(PENIS_PHYSICS_CONFIG_SECTION,
                       "gravity_horizontal_curve",
@@ -2346,6 +2354,9 @@ static void body_profile_overlay_body_physics_sections(int person_index,
     body_chain_physics_cfg.interval_ms =
         GetPrivateProfileIntA(PENIS_PHYSICS_CONFIG_SECTION, "interval_ms",
                               body_chain_physics_cfg.interval_ms, path);
+    body_chain_physics_cfg.update_rate_hz = body_update_clamp_rate((int)
+        GetPrivateProfileIntA(PENIS_PHYSICS_CONFIG_SECTION, "update_rate_hz",
+                              body_chain_physics_cfg.update_rate_hz, path));
     body_profile_clamp_current_physics_config(&body_chain_physics_cfg, 3);
 
     testicle_enabled = testicle_physics_cfg.enabled;
@@ -2468,6 +2479,9 @@ static void body_profile_overlay_body_physics_sections(int person_index,
         GetPrivateProfileIntA(TESTICLE_PHYSICS_CONFIG_SECTION,
                               "interval_ms",
                               testicle_physics_cfg.interval_ms, path);
+    testicle_physics_cfg.update_rate_hz = body_update_clamp_rate((int)
+        GetPrivateProfileIntA(TESTICLE_PHYSICS_CONFIG_SECTION, "update_rate_hz",
+                              testicle_physics_cfg.update_rate_hz, path));
     body_profile_clamp_current_physics_config(&testicle_physics_cfg, 2);
 
     body_profile_overlay_paired_physics_section(
@@ -4111,6 +4125,10 @@ static void load_global_config(void)
     body_chain_physics_cfg.horizontal_deadzone = body_chain_physics_cfg.translation_deadzone;
     body_chain_physics_cfg.vertical_deadzone = body_chain_physics_cfg.translation_deadzone;
     body_chain_physics_cfg.gravity_angle = profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_angle", body_chain_physics_cfg.gravity_angle, config_path);
+    body_chain_physics_cfg.gravity_horizontal_strength = physx_clampf(
+        profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_horizontal_strength", 1.0f, config_path), 0.0f, 4.0f);
+    body_chain_physics_cfg.gravity_vertical_strength = physx_clampf(
+        profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_vertical_strength", 1.0f, config_path), 0.0f, 4.0f);
     body_chain_physics_cfg.gravity_horizontal_curve =
         profile_float(PENIS_PHYSICS_CONFIG_SECTION,
                       "gravity_horizontal_curve",
@@ -4160,6 +4178,8 @@ static void load_global_config(void)
     body_chain_physics_cfg.link_gain[1] = profile_float(PENIS_PHYSICS_CONFIG_SECTION, "joint02_gain", body_chain_physics_cfg.link_gain[1], config_path);
     body_chain_physics_cfg.link_gain[2] = profile_float(PENIS_PHYSICS_CONFIG_SECTION, "joint03_gain", body_chain_physics_cfg.link_gain[2], config_path);
     body_chain_physics_cfg.interval_ms = GetPrivateProfileIntA(PENIS_PHYSICS_CONFIG_SECTION, "interval_ms", body_chain_physics_cfg.interval_ms, config_path);
+    body_chain_physics_cfg.update_rate_hz = body_update_clamp_rate((int)
+        GetPrivateProfileIntA(PENIS_PHYSICS_CONFIG_SECTION, "update_rate_hz", 0, config_path));
     body_chain_physics_cfg.zero_output_rest = profile_bool(PENIS_PHYSICS_INTERNAL_CONFIG_SECTION, "zero_output_rest", body_chain_physics_cfg.zero_output_rest, config_path);
     if (body_chain_physics_cfg.interval_ms < 16) body_chain_physics_cfg.interval_ms = 16;
     if (body_chain_physics_cfg.interval_ms > 1000) body_chain_physics_cfg.interval_ms = 1000;
@@ -4467,6 +4487,8 @@ static void load_global_config(void)
     testicle_physics_cfg.interval_ms =
         GetPrivateProfileIntA(TESTICLE_PHYSICS_CONFIG_SECTION, "interval_ms",
                               testicle_physics_cfg.interval_ms, config_path);
+    testicle_physics_cfg.update_rate_hz = body_update_clamp_rate((int)
+        GetPrivateProfileIntA(TESTICLE_PHYSICS_CONFIG_SECTION, "update_rate_hz", 0, config_path));
     if (testicle_physics_cfg.interval_ms < 16) testicle_physics_cfg.interval_ms = 16;
     if (testicle_physics_cfg.interval_ms > 1000) testicle_physics_cfg.interval_ms = 1000;
     testicle_physics_cfg.horizontal_drive_scale =
@@ -4666,6 +4688,8 @@ static void load_global_config(void)
         GetPrivateProfileIntA(BREASTS_PHYSICS_CONFIG_SECTION, "interval_ms",
                               breasts_physics_global_cfg.interval_ms,
                               config_path);
+    breasts_physics_global_cfg.update_rate_hz = body_update_clamp_rate((int)
+        GetPrivateProfileIntA(BREASTS_PHYSICS_CONFIG_SECTION, "update_rate_hz", 0, config_path));
 
     {
         char internal_buf[64];
@@ -5095,6 +5119,8 @@ static void load_global_config(void)
         GetPrivateProfileIntA(BUTT_PHYSICS_CONFIG_SECTION, "interval_ms",
                               butt_physics_global_cfg.interval_ms,
                               config_path);
+    butt_physics_global_cfg.update_rate_hz = body_update_clamp_rate((int)
+        GetPrivateProfileIntA(BUTT_PHYSICS_CONFIG_SECTION, "update_rate_hz", 0, config_path));
     {
         char internal_buf[64];
         GetPrivateProfileStringA(BUTT_PHYSICS_INTERNAL_CONFIG_SECTION,
@@ -5938,6 +5964,14 @@ static void load_global_config(void)
              testicle_physics_cfg.link_gain[0],
              testicle_physics_cfg.link_gain[1],
              testicle_physics_cfg.interval_ms);
+    log_line("body-chain gravity-strength config penis=(h=%.3f,v=%.3f) note=\"final gravity multipliers apply at every tilt; 1 preserves existing response; 0 disables the mapped gravity axis\"",
+             body_chain_physics_cfg.gravity_horizontal_strength,
+             body_chain_physics_cfg.gravity_vertical_strength);
+    log_line("body-chain update-rate config penis_hz=%d testicle_hz=%d breasts_hz=%d butt_hz=%d note=\"0 uses interval_ms; -1 follows render frames; 1..240 targets Hz on render frames\"",
+             body_chain_physics_cfg.update_rate_hz,
+             testicle_physics_cfg.update_rate_hz,
+             breasts_physics_global_cfg.update_rate_hz,
+             butt_physics_global_cfg.update_rate_hz);
     log_line("body-chain gravity-curve config penis=(h=%.2f,v=%.2f) testicle=(h=%.2f,v=%.2f) response_ms=%.1f note=\"direction-weighted curves preserve gravity direction; 1.0 is legacy and near-complete orientations recover full strength\"",
              body_chain_physics_cfg.gravity_horizontal_curve,
              body_chain_physics_cfg.gravity_vertical_curve,

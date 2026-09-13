@@ -1,3 +1,5 @@
+#include "physx_collision_profile.h"
+
 #define ROOM_COLLISION_SIDECAR_COUNT 64
 #define ROOM_COLLISION_TEXTURE_COUNT 64
 #define ROOM_COLLISION_GRAPH_COUNT 4096
@@ -937,6 +939,7 @@ static int room_collision_resolve_sphere(const float center[3], float radius,
                                          float correction[3],
                                          int *mesh_index_out)
 {
+    COLLISION_PROFILE_SCOPE(profile_room, CP_ROOM_SPHERE);
     physx_contact_set_t contacts = {0};
     int stack[128];
     int stack_count = 0;
@@ -950,6 +953,7 @@ static int room_collision_resolve_sphere(const float center[3], float radius,
     radius_sq = radius * radius;
     stack[stack_count++] = 0;
     while (stack_count > 0) {
+        COLLISION_PROFILE_COUNT(CP_ROOM_NODES, 1);
         room_collision_bvh_node_t *node =
             &room_collision_bvh[stack[--stack_count]];
         int i;
@@ -961,6 +965,7 @@ static int room_collision_resolve_sphere(const float center[3], float radius,
             continue;
         }
         for (i = node->start; i < node->start + node->count; i++) {
+            COLLISION_PROFILE_COUNT(CP_ROOM_TRIANGLES, 1);
             room_collision_triangle_t *tri = &room_collision_triangles[i];
             float closest[3], delta[3], dist, penetration;
             room_collision_closest_triangle_point(
@@ -1024,6 +1029,7 @@ static int room_collision_resolve_swept_sphere(
     const float start[3], const float end[3], float radius,
     float correction[3], int *mesh_index_out)
 {
+    COLLISION_PROFILE_SCOPE(profile_room, CP_ROOM_SWEEP);
     float delta[3];
     float distance;
     float start_correction[3];
@@ -1154,6 +1160,7 @@ static int body_collision_local_point_to_world(
 static int single_bone_room_contacts(const float center[3], float radius,
     physx_contact_set_t *out)
 {
+    COLLISION_PROFILE_SCOPE(profile_room, CP_ROOM_SINGLE);
     physx_contact_set_t contacts = {0};
     int stack[128];
     int stack_count = 0;
@@ -1166,6 +1173,7 @@ static int single_bone_room_contacts(const float center[3], float radius,
     radius_sq = radius * radius;
     stack[stack_count++] = 0;
     while (stack_count > 0) {
+        COLLISION_PROFILE_COUNT(CP_ROOM_NODES, 1);
         room_collision_bvh_node_t *node =
             &room_collision_bvh[stack[--stack_count]];
         int i;
@@ -1177,6 +1185,7 @@ static int single_bone_room_contacts(const float center[3], float radius,
             continue;
         }
         for (i = node->start; i < node->start + node->count; i++) {
+            COLLISION_PROFILE_COUNT(CP_ROOM_TRIANGLES, 1);
             room_collision_triangle_t *tri = &room_collision_triangles[i];
             float closest[3], delta[3], dist, penetration;
             room_collision_closest_triangle_point(

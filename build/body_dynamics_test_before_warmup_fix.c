@@ -1,21 +1,4 @@
-"""Validate production geometry-dependent gravity and effective link inertia."""
-from pathlib import Path
-import os
-import re
-import subprocess
 
-ROOT = Path(__file__).resolve().parent
-
-def function(name, file='physx_physics.c'):
-    source=(ROOT/file).read_text()
-    match=re.search(r'^static [^;{}]*\b'+name+r'\([^;{}]*\)\s*\{',source,re.M)
-    if not match: raise ValueError(name)
-    pos,depth=match.end(),1
-    while depth:
-        depth+=(source[pos]=='{')-(source[pos]=='}');pos+=1
-    return source[match.start():pos]+'\n'
-
-source = r'''
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <assert.h>
@@ -107,8 +90,7 @@ static void invalid_geometry(void) {
     pose.length[1]=.1f;assert(!body_dynamics_prepare(&pose,e,1,1,&model));
     puts("PASS: invalid lengths/axes reject the model without damaging a previous valid reference");
 }
-'''
-source+=r'''
+
 typedef unsigned long DWORD;
 typedef struct {float gravity_horizontal_strength,gravity_vertical_strength;} body_chain_physics_config_t;
 typedef struct {
@@ -132,15 +114,110 @@ static int room_collision_world_vector_to_body_local(const test_collider *state,
 static float physx_vec3_len(const float *v){return sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);}
 static float body_chain_clamp_link_axis_angle(const body_chain_physics_config_t *cfg,int j,int a,float value){(void)cfg;(void)j;(void)a;return fminf(80,fmaxf(-80,value));}
 static int body_chain_limit_total_rotation(const body_chain_physics_config_t *cfg,float v[3][3],float velocity[3][3],int count){(void)cfg;(void)v;(void)velocity;(void)count;return 0;}
-'''
-source+=function('body_chain_apply_link_inertia')+function('body_chain_shape_gravity')+function('body_chain_shape_penis_gravity')
-source+=function('profile_float','physx_config.c')
-assignments=re.findall(r'body_chain_physics_cfg\.gravity_(?:horizontal|vertical)_strength\s*=\s*physx_clampf\([\s\S]*?;', (ROOT/'physx_config.c').read_text())
-assert len(assignments)==4
-source+='static body_chain_physics_config_t body_chain_physics_cfg;\n#define PENIS_PHYSICS_CONFIG_SECTION "penis_physics"\n'
-source+='static void read_global(const char *config_path){'+''.join(a for a in assignments if 'config_path' in a)+'}\n'
-source+='static void read_sidecar(const char *path){'+''.join(a for a in assignments if 'config_path' not in a)+'}\n'
-source+=r'''
+static void body_chain_apply_link_inertia(const body_chain_person_state_t *state,
+    int joint,int axis,float *stiffness,float *damping)
+{
+    int a;
+    if(!state->dynamics_valid || joint>=state->dynamics.segments) return;
+    for(a=0;a<2;a++) if(axis==state->dynamics.axis[a]) {
+        float inverse=state->dynamics.inverse_inertia[joint][a];
+        *stiffness*=inverse;
+        /* Keep the user's damping ratio while changing the natural period. */
+        *damping*=sqrtf(inverse);
+    }
+}
+static void body_chain_shape_gravity(int person,body_chain_person_state_t *state,
+    const body_chain_physics_config_t *cfg,DWORD now,float dt,
+    const float configured[3][3],float target[3][3])
+{
+    float euler[3][3],shaped[3][3];int j,a;
+    state->dynamics_gravity_active=0;
+    if(!state->dynamics_valid || !physics_environment_cfg.gravity_apply_to_body_chain ||
+       !state->gravity_probe_promoted) return;
+    if(!body_chain_collider_states[person].ready ||
+       !body_chain_collider_states[person].basis_valid) return;
+    /* Geometric gravity uses the same sample protocol as the primary drive.
+       Gather while held too, so both can confirm promptly after the camera stops. */
+    {
+        float candidate[3], trusted[3];
+        int valid = !body_chain_camera_pivot_hold_active(now) &&
+            room_collision_world_vector_to_body_local(&body_chain_collider_states[person],
+                physics_environment_cfg.world_gravity, candidate);
+        if (valid) {
+            float length = physx_vec3_len(candidate);
+            valid = length > .00001f && isfinite(length);
+            if (valid) for (a=0;a<3;a++) candidate[a] /= length;
+        }
+        if (gravity_sample_live(&state->geometry_sample,state->root_raw,
+                candidate,valid,now,trusted) && state->geometry_sample.accepted &&
+            !state->gravity_camera_hold_active) {
+            float response=physics_environment_cfg.gravity_response_ms*.001f;
+            float alpha=response>0?1.0f-expf(-dt/response):1.0f;
+            for(a=0;a<3;a++)
+                state->dynamics_gravity_direction[a]=state->dynamics_gravity_valid?
+                    state->dynamics_gravity_direction[a]+alpha*(trusted[a]-state->dynamics_gravity_direction[a]):trusted[a];
+            state->dynamics_gravity_valid=1;
+        }
+    }
+    if(!state->dynamics_gravity_valid) return;
+    for(j=0;j<3;j++) for(a=0;a<3;a++)
+        euler[j][a]=state->dynamics.reference.euler[j][a]+state->angle[j][a];
+    if(!body_dynamics_gravity(&state->dynamics.reference,&state->dynamics,euler,
+        state->dynamics_gravity_direction,configured,shaped)) return;
+    for(j=0;j<state->dynamics.segments;j++) for(a=0;a<3;a++)
+        target[j][a]=body_chain_clamp_link_axis_angle(cfg,j,a,
+            target[j][a]+shaped[j][a]-configured[j][a]);
+    body_chain_limit_total_rotation(cfg,target,NULL,state->dynamics.segments);
+    state->dynamics_gravity_active=1;
+}
+static void body_chain_shape_penis_gravity(int person,body_chain_person_state_t *state,
+    const body_chain_physics_config_t *cfg,DWORD now,float dt,
+    const float configured[3][3],float target[3][3])
+{
+    float gravity[3][3];int j,a;
+    static DWORD last_log[4];
+    if (cfg->gravity_horizontal_strength == 1.0f && cfg->gravity_vertical_strength == 1.0f) {
+        body_chain_shape_gravity(person,state,cfg,now,dt,configured,target);
+        return;
+    }
+    memcpy(gravity,configured,sizeof(gravity));
+    body_chain_shape_gravity(person,state,cfg,now,dt,configured,gravity);
+    for (j=0;j<3;j++) for (a=0;a<3;a++) {
+        float strength=1.0f;
+        if (a==physics_environment_cfg.gravity_horizontal_tail_axis)
+            strength*=cfg->gravity_horizontal_strength;
+        if (a==physics_environment_cfg.gravity_vertical_tail_axis)
+            strength*=cfg->gravity_vertical_strength;
+        target[j][a]=body_chain_clamp_link_axis_angle(cfg,j,a,
+            target[j][a]-configured[j][a]+gravity[j][a]*strength);
+    }
+    body_chain_limit_total_rotation(cfg,target,NULL,3);
+    if (defaults_cfg.debug && (!last_log[person] || now-last_log[person]>=1000)) {
+        last_log[person]=now;
+        log_line("body-chain gravity-strength person=Person%02d strength=(h=%.3f,v=%.3f) geometry=%d gravity01=(%.4f,%.4f,%.4f) target01=(%.4f,%.4f,%.4f)",
+            person+1,cfg->gravity_horizontal_strength,cfg->gravity_vertical_strength,
+            state->dynamics_gravity_active,gravity[0][0],gravity[0][1],gravity[0][2],
+            target[0][0],target[0][1],target[0][2]);
+    }
+}
+static float profile_float(const char *section, const char *key, float fallback, const char *path)
+{
+    char buf[128];
+    GetPrivateProfileStringA(section, key, "", buf, sizeof(buf), path);
+    if (!buf[0]) return fallback;
+    return (float)atof(buf);
+}
+static body_chain_physics_config_t body_chain_physics_cfg;
+#define PENIS_PHYSICS_CONFIG_SECTION "penis_physics"
+static void read_global(const char *config_path){body_chain_physics_cfg.gravity_horizontal_strength = physx_clampf(
+        profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_horizontal_strength", 1.0f, config_path), 0.0f, 4.0f);body_chain_physics_cfg.gravity_vertical_strength = physx_clampf(
+        profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_vertical_strength", 1.0f, config_path), 0.0f, 4.0f);}
+static void read_sidecar(const char *path){body_chain_physics_cfg.gravity_horizontal_strength = physx_clampf(
+        profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_horizontal_strength",
+                      body_chain_physics_cfg.gravity_horizontal_strength, path), 0.0f, 4.0f);body_chain_physics_cfg.gravity_vertical_strength = physx_clampf(
+        profile_float(PENIS_PHYSICS_CONFIG_SECTION, "gravity_vertical_strength",
+                      body_chain_physics_cfg.gravity_vertical_strength, path), 0.0f, 4.0f);}
+
 static void production_wiring(void) {
     body_chain_person_state_t s={0};body_chain_physics_config_t cfg={0};body_contact_pose_t pose=rod(3);
     float zero[3][3]={{0}},configured[3][3]={{0,10,0},{0,10,0},{0,10,0}},target[3][3],baseline[3][3];
@@ -288,15 +365,4 @@ static void strength_config(void) {
     assert(DeleteFileA(file));
     puts("PASS: production INI assignments load strengths, inherit sidecars, apply overrides/clamps and restore defaults on removal");
 }
-int main(void){analytic_rod();gravity_orientation();scaling_and_lag();free_rest();invalid_geometry();production_wiring();gravity_during_collision_warmup();gravity_strength();strength_config();return 0;}
-'''
-build = ROOT / 'build'
-build.mkdir(exist_ok=True)
-test = build / 'body_dynamics_test.c'
-test.write_text(source)
-gcc = Path(r'C:\msys64\mingw32\bin\gcc.exe')
-env = dict(os.environ, PATH=str(gcc.parent)+os.pathsep+os.environ['PATH'])
-exe = build / 'body_dynamics_test.exe'
-subprocess.run([str(gcc), '-m32', '-O2', '-Wall', '-Wextra', '-Werror',
-                '-Wno-unused-function', '-static-libgcc', '-o', str(exe), str(test)], env=env, check=True)
-subprocess.run([str(exe)], env=env, check=True, timeout=60)
+int main(void){gravity_during_collision_warmup();return 0;}

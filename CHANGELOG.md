@@ -1,3 +1,80 @@
+# Gravity during collider warmup - 2026-09-13
+
+- Follow-up in-game testing showed that the filter change below did not resolve
+  the visible transition. The next capture identified geometric gravity being
+  disabled by the collider readiness gate, despite strengths already applying.
+- Let confirmed local engine geometry initialize chain dynamics during collider
+  warmup, and keep geometric gravity independent of collision readiness.
+- Preserve collision settling/response gates and reject unconfirmed, held,
+  synthetic or stale samples when initializing during warmup. Config unchanged.
+- Regression fixtures cover both chains before/after promotion and repeated
+  warmups; visual validation of this follow-up remains pending.
+
+# Penis/testicle gravity transition - 2026-09-13
+
+- On a confirmed large orientation change, seed the mapped and geometric
+  gravity filters from the new pose instead of blending from the previous pose.
+- Retain sample confirmation and camera holds, including changes confirmed while
+  a body hold is active. Ordinary animated motion keeps its existing smoothing.
+- Preserve spring state, contacts, neutral references and all config values.
+- Regression tests reproduce the logged direction change at 30/60/90/144 Hz.
+  Visual pose-load validation remains pending. See
+  [POSE-GRAVITY-TRANSITION.md](docs/POSE-GRAVITY-TRANSITION.md).
+
+# Penis gravity strength controls - 2026-09-13
+
+- Added `gravity_horizontal_strength` / `gravity_vertical_strength` (0..4,
+  default 1) under penis_physics, with global reload and body-sidecar overrides.
+- Scale final gravity after geometric shaping so full-tilt and inverted mapped
+  gravity remain adjustable; movement and wind retain their existing inputs.
+- Preserve the existing partial-tilt curve semantics and exact unit-strength path.
+- Added both controls at 1 in the installed/default config; existing values remain.
+- Full-tilt geometry-transition and config regression tests pass. In-game checking
+  is pending. Details: [PENIS-GRAVITY-STRENGTH.md](docs/PENIS-GRAVITY-STRENGTH.md).
+
+# Smoother breast and butt updates - 2026-09-13
+
+- Extended `update_rate_hz` to breasts and butt, including global config,
+  body-sidecar inheritance/overrides, collider refresh and cadence logging.
+- Nonzero mode normalizes movement to the 16 ms reference response and uses
+  bounded angular substeps; gravity, wind and constant sag retain their strength.
+- Zero/omitted retains legacy timing and integration. Installed config unchanged.
+- Scheduling, paired motion and single-bone contact regressions pass; in-game
+  smoothness and FPS cost await testing. See [BODY-UPDATE-RATE.md](docs/BODY-UPDATE-RATE.md).
+
+# Optional smoother body updates - 2026-09-13
+
+- Added per-section `update_rate_hz` for penis/testicles: 0 retains existing
+  timing, -1 follows render frames, and 1..240 targets a configurable rate.
+- Shared precise frame timing, coordinated collider refresh, bounded stalls
+  and rate-switch rebasing; existing motion and solver settings are retained.
+- Added actual body update frequency to the existing performance profile log.
+- Scheduling, INI inheritance, collider cache and body physics regressions pass;
+  the 32-bit DLL builds. In-game smoothness and FPS cost await testing.
+- Installed config unchanged. See [BODY-UPDATE-RATE.md](docs/BODY-UPDATE-RATE.md).
+
+# Body contact velocity optimization - 2026-09-13
+
+- The detailed gameplay capture identified repeated body-solver geometry work.
+- Reused each contact's fixed Jacobian across the eight velocity passes within
+  one solve; retained pass order, live velocities, inertia and limit handling.
+- 2,400 old/new comparisons produced identical correction and velocity outputs.
+  Existing contact regressions and instrumented fixtures pass; DLL builds.
+- Isolated contact workloads took 18-54% less solver time; in-game validation
+  and FPS comparison of this change are pending. Config files are unchanged.
+- Details: [BODY-CONTACT-PERFORMANCE.md](docs/BODY-CONTACT-PERFORMANCE.md).
+
+# Collision profiling build - 2026-09-13
+
+- Fixed detail records being filtered out with debug disabled; an integration
+  test now verifies the actual file logger emits them under performance_profile.
+- Preserved the approved wind/activation checkpoint and physics behavior.
+- Added opt-in collision collection/solve/room timings and workload counters
+  under the existing performance_profile switch; no config files were changed.
+- Collision regressions pass with profiling both erased and enabled. The
+  32-bit DLL builds; a contact-heavy in-game capture is the next step.
+- Field definitions and test steps: [COLLISION-PROFILING.md](docs/COLLISION-PROFILING.md).
+
 # Code performance and continuous wind - 2026-09-12
 
 - Added validated positive lookup hints for addon/equipment registries and

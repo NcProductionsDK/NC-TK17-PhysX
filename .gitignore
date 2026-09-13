@@ -43,3 +43,14 @@ build/collision_frame_test.exe
 
 build/before-wind-optimization/
 build/optimization-tests/
+
+build/collision-profile-baseline/
+build/collision-profile-tests/
+
+build/body-contact-optimization-baseline/
+build/body-contact-performance/
+build/body_update_test.c
+build/body_update_test.exe
+build/smooth-body-backup-*/
+build/paired_body_update_test.c
+build/paired_body_update_test.exe

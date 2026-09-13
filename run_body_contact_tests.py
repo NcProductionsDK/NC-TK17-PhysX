@@ -32,7 +32,7 @@ static float physx_absf(float v){return fabsf(v);}
 static int sane_probe_float(float v){return isfinite(v);}
 static float vec3_dot(const float *a,const float *b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
 static float physx_vec3_len(const float *v){return sqrtf(vec3_dot(v,v));}
-typedef struct {int horizontal_output_axis,vertical_output_axis,rotation_tail_axis[3];float link_min_angle[3][3],link_max_angle[3][3];} body_chain_physics_config_t;
+typedef struct {int horizontal_output_axis,vertical_output_axis,rotation_tail_axis[3],output_offset,collision_scope;float link_min_angle[3][3],link_max_angle[3][3];} body_chain_physics_config_t;
 static body_chain_physics_config_t body_chain_physics_cfg;
 static struct {float response_strength,response_max_degrees_per_tick;int collision_iterations;float link_length[3];} body_chain_collider_cfg={1,20,2,{.5f,.5f,.5f}};
 typedef struct {
@@ -45,6 +45,8 @@ typedef struct {
     int collision_pose_valid;
     body_dynamics_t dynamics;
     int dynamics_valid;
+    int gravity_camera_hold_active,initialized,active_logged;
+    void *joint_raw[3];
     float collision_contact_direction[3][2],collision_prev_max_penetration;
     int collision_rest_valid,collision_rest_ticks,collision_rest_grace_ticks,collision_impact_ticks,collision_multi_support_grace_ticks;
 } body_chain_person_state_t;
@@ -55,6 +57,7 @@ typedef struct {
     float chain_local_point[4][3];
     int chain_points_ready,chain_points_fresh,chain_point_valid[4];
     DWORD chain_points_update_tick;
+    int ready,basis_valid;
 } body_chain_collider_person_state_t;
 '''
 fixture=fixture.replace('#include "../physx_body_pose.h"', function('physx_contact_rotation_rows',(root/'physx_contact_math.h').read_text()) + (root/'physx_body_pose.h').read_text().replace('#include "physx_contact_math.h"',''))
@@ -85,6 +88,22 @@ for name in ['body_contact_inverse_inertia','body_contact_predict','body_contact
              'body_contact_solve','body_contact_apply']:
     fixture+=function(name,contact)
 fixture+=function('body_chain_penis_cross_sample',colliders)
+fixture+=r'''
+typedef unsigned char BYTE;
+static body_chain_physics_config_t testicle_physics_cfg;
+static body_chain_collider_person_state_t body_chain_collider_states[4];
+static body_chain_person_state_t body_chain_person_states[4],runtime_body_chain_person_states[4],testicle_physics_states[4],runtime_testicle_physics_states[4];
+static long body_chain_poseeditor_mode_active;
+static long InterlockedCompareExchange(long *v,long a,long b){long old=*v;if(old==b)*v=a;return old;}
+static struct {int gravity_horizontal_basis_offset,gravity_vertical_basis_offset,gravity_horizontal_secondary_basis_offset;} physics_environment_cfg={0x088,0x098,0x078};
+static int pivot_hold,frame_updates;
+static int body_chain_camera_pivot_hold_active(DWORD now){(void)now;return pivot_hold;}
+static int ptr_readable(const void *p,size_t n){(void)n;return p!=NULL;}
+static int body_chain_collision_scope_collider_mask(int scope){return scope;}
+static void update_body_chain_colliders_for_person_scope(int p,DWORD now,int scope){(void)p;(void)now;(void)scope;frame_updates++;}
+static void body_contact_trace_pose(const body_chain_collider_person_state_t *c,body_chain_person_state_t *s,const body_chain_physics_config_t *cfg,int t,DWORD now,const float observed[4][3],int engine){(void)c;(void)s;(void)cfg;(void)t;(void)now;(void)observed;(void)engine;}
+'''
+fixture+=function('body_contact_capture_step',contact)+function('body_contact_begin_step',contact)
 fixture+=r'''
 static const float base[4][3]={{0,0,0},{-.1f,0,0},{-.1f,.1f,0},{-.1f,.2f,0}};
 static void configure(void){
@@ -436,11 +455,53 @@ static void deep_overlap(void){
     body_chain_collider_cfg.response_max_degrees_per_tick=20;
     body_chain_collider_cfg.response_strength=1;
 }
-int main(void){setbuf(stdout,NULL);configure();supports();candidate();testicle_geometry();asynchronous_cross_sample();velocity();blocked_velocity();limits();composed_contact();contact_near_limit();inertia_contact_energy();observed_pose_error();embedded_history();competing_supports();thigh_recovery();deep_overlap();settling();return 0;}
+static void warmup_geometry(void){
+    testicle_physics_cfg=body_chain_physics_cfg;
+    for(int testicle=0;testicle<=1;testicle++){
+        body_chain_person_state_t s={0};body_chain_collider_person_state_t *c=&body_chain_collider_states[0];
+        float published[3][3]={{0}};memset(c,0,sizeof(*c));
+        c->basis_valid=1;c->chain_points_ready=c->chain_points_fresh=c->testicle_points_ready=1;
+        c->chain_points_update_tick=c->testicle_points_update_tick=1000;
+        for(int j=0;j<4;j++){
+            c->chain_point_valid[j]=1;c->chain_local_point[j][0]=-.1f*j;
+            if(j<3){c->testicle_joint_position[j][0]=-.1f*j;s.joint_raw[j]=published[j];}
+        }
+        body_contact_begin_step(0,&s,testicle,1000,.016f);
+        assert(!c->ready && s.dynamics_valid && s.collision_pose_valid);
+        assert(s.dynamics.segments==(testicle?2:3));
+        body_dynamics_t before=s.dynamics;
+        c->ready=1;c->chain_points_update_tick=c->testicle_points_update_tick=1016;
+        body_contact_begin_step(0,&s,testicle,1016,.016f);
+        assert(s.dynamics_valid && !memcmp(&before,&s.dynamics,sizeof(before)));
+        /* Invalid basis, held/unconfirmed or old pivots cannot initialize a
+           chain before the collision gate. Previously prepared dynamics survive. */
+        c->ready=0;c->basis_valid=0;
+        body_contact_begin_step(0,&s,testicle,1032,.016f);assert(!s.collision_step_valid);
+        assert(!memcmp(&before,&s.dynamics,sizeof(before)));
+        c->basis_valid=1;c->chain_points_update_tick=c->testicle_points_update_tick=1048;
+        s.gravity_camera_hold_active=1;
+        body_contact_begin_step(0,&s,testicle,1048,.016f);assert(!s.collision_step_valid);
+        s.gravity_camera_hold_active=0;pivot_hold=1;
+        c->chain_points_update_tick=c->testicle_points_update_tick=1064;
+        body_contact_begin_step(0,&s,testicle,1064,.016f);assert(!s.collision_step_valid);
+        pivot_hold=0;body_contact_begin_step(0,&s,testicle,1080,.016f);assert(!s.collision_step_valid);
+        c->chain_points_update_tick=c->testicle_points_update_tick=1096;
+        body_contact_begin_step(0,&s,testicle,1096,.016f);assert(s.collision_pose_valid && !c->ready);
+        if(!testicle){
+            c->chain_points_fresh=0;c->chain_points_update_tick=1112;
+            body_contact_begin_step(0,&s,0,1112,.016f);assert(!s.collision_step_valid);
+            c->chain_points_ready=0;
+            body_contact_begin_step(0,&s,0,1128,.016f);assert(!s.collision_step_valid);
+        }
+    }
+    assert(frame_updates>0);
+    puts("PASS: production capture/begin initializes both chain models before collision promotion from current engine pivots only; ready toggle preserves model, unsafe/held/synthetic samples rejected");
+}
+int main(void){setbuf(stdout,NULL);configure();supports();candidate();testicle_geometry();asynchronous_cross_sample();velocity();blocked_velocity();limits();composed_contact();contact_near_limit();inertia_contact_energy();observed_pose_error();embedded_history();competing_supports();thigh_recovery();deep_overlap();settling();warmup_geometry();return 0;}
 '''
 build=root/'build';build.mkdir(exist_ok=True)
 path=build/'body_contact_test.c';path.write_text(fixture)
 gcc=Path(r'C:\msys64\mingw32\bin\gcc.exe');env=dict(os.environ)
 env['PATH']=str(gcc.parent)+os.pathsep+env['PATH'];exe=build/'body_contact_test.exe'
-subprocess.run([str(gcc),'-m32','-O2','-Wall','-Wextra','-Werror','-static-libgcc','-o',str(exe),str(path)],env=env,check=True)
+subprocess.run([str(gcc),'-m32', '-include', str(root / 'physx_collision_profile.h'),'-O2','-Wall','-Wextra','-Werror','-static-libgcc','-o',str(exe),str(path)],env=env,check=True)
 subprocess.run([str(exe)],env=env,check=True,timeout=60)

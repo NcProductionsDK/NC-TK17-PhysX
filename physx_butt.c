@@ -401,13 +401,12 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
     if (!state->initialized && state->resolve_retry_tick &&
         now - state->resolve_retry_tick <
             (DWORD)BUTT_PHYSICS_MISSING_RETRY_MS) return;
-    if (state->last_tick &&
-        now - state->last_tick < (DWORD)cfg->interval_ms) return;
-    elapsed_ms = state->last_tick ? now - state->last_tick : 0;
+    if (!body_update_due(&state->update_clock, cfg->update_rate_hz,
+            cfg->interval_ms, state->last_tick, now, body_update_frame_us)) return;
+    elapsed_ms = body_update_elapsed(&state->update_clock, cfg->update_rate_hz,
+        state->last_tick, now, body_update_frame_us);
     state->last_tick = now;
-    dt = elapsed_ms ? (float)elapsed_ms / 1000.0f : 0.016f;
-    if (dt <= 0.0f) dt = 0.016f;
-    if (dt > 0.025f) dt = 0.025f;
+    dt = paired_body_duration(cfg->update_rate_hz, elapsed_ms);
 
     if (state->initialized && state->cache_verify_tick &&
         now - state->cache_verify_tick <
@@ -512,6 +511,8 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
     body_chain_camera_neutral_pivot_step(
         person, person_index, &state->motion, root_pivot,
         cfg->root_offset, NULL, local_step);
+    paired_body_scale_motion(cfg->update_rate_hz, elapsed_ms,
+        local_step, parent_rotation_step);
     for (channel = 0; channel < 3; channel++) {
         translation_step[channel] =
             local_step[cfg->translation_source_axis[channel]];
@@ -572,20 +573,11 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
                 target[side]);
         }
         for (axis = 0; axis < 3; axis++) {
-            float acceleration;
             target[side][axis] = body_chain_clamp_link_axis_angle(
                 cfg, 0, axis, target[side][axis] * cfg->link_gain[0]);
-            acceleration =
-                (target[side][axis] - state->rotation[side][axis]) *
-                    cfg->stiffness -
-                state->angular_velocity[side][axis] * cfg->damping;
-            state->angular_velocity[side][axis] += acceleration * dt;
-            state->rotation[side][axis] +=
-                state->angular_velocity[side][axis] * dt;
-            state->rotation[side][axis] =
-                body_chain_clamp_link_axis_angle(
-                    cfg, 0, axis, state->rotation[side][axis]);
         }
+        paired_body_rotation_step(cfg, state->rotation[side],
+            state->angular_velocity[side], target[side], dt);
     }
     /* Free translation targets remain independent of contact recovery. */
     for (side = 0; side < 2; side++) {
@@ -607,6 +599,7 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
         memset(state->bone_translation_velocity,0,sizeof(state->bone_translation_velocity));
     }
     butt_physics_apply_output(state, 0, 0);
+    body_update_record_publish(person_index, 3, now, cfg->update_rate_hz);
     if (!state->active_logged) {
         state->active_logged = 1;
         log_line("butt-physics active person=\"%s\" targets=\"butt_L_joint01,butt_R_joint01\" gravity=(strength=%.2f,inverted_strength=%.2f,inverted_axis=%d,inverted_sign=%.2f) spring=(%.2f,%.2f) bone_translation=(enabled=%d,space=%s,stiffness=%.2f,damping=%.2f,max=%.4f/%.4f/%.4f) collision=(enabled=%d,scope=%s) translation_gravity_sag=not-supported note=\"two independent single-bone springs; child joints follow naturally\"",

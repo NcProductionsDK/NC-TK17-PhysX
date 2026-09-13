@@ -27,13 +27,15 @@ static void body_chain_shape_gravity(int person,body_chain_person_state_t *state
     state->dynamics_gravity_active=0;
     if(!state->dynamics_valid || !physics_environment_cfg.gravity_apply_to_body_chain ||
        !state->gravity_probe_promoted) return;
-    if(!body_chain_collider_states[person].ready ||
-       !body_chain_collider_states[person].basis_valid) return;
+    /* Collision readiness includes a load/placement settling delay. Gravity
+       needs a valid orientation, not permission to apply contact response.
+       Keep the established direction while the basis is temporarily absent. */
     /* Geometric gravity uses the same sample protocol as the primary drive.
        Gather while held too, so both can confirm promptly after the camera stops. */
     {
         float candidate[3], trusted[3];
-        int valid = !body_chain_camera_pivot_hold_active(now) &&
+        int valid = body_chain_collider_states[person].basis_valid &&
+            !body_chain_camera_pivot_hold_active(now) &&
             room_collision_world_vector_to_body_local(&body_chain_collider_states[person],
                 physics_environment_cfg.world_gravity, candidate);
         if (valid) {
@@ -46,6 +48,10 @@ static void body_chain_shape_gravity(int person,body_chain_person_state_t *state
             !state->gravity_camera_hold_active) {
             float response=physics_environment_cfg.gravity_response_ms*.001f;
             float alpha=response>0?1.0f-expf(-dt/response):1.0f;
+            if (state->geometry_sample.accepted_jump) {
+                state->dynamics_gravity_valid=0;
+                state->geometry_sample.accepted_jump=0;
+            }
             for(a=0;a<3;a++)
                 state->dynamics_gravity_direction[a]=state->dynamics_gravity_valid?
                     state->dynamics_gravity_direction[a]+alpha*(trusted[a]-state->dynamics_gravity_direction[a]):trusted[a];
@@ -62,6 +68,41 @@ static void body_chain_shape_gravity(int person,body_chain_person_state_t *state
             target[j][a]+shaped[j][a]-configured[j][a]);
     body_chain_limit_total_rotation(cfg,target,NULL,state->dynamics.segments);
     state->dynamics_gravity_active=1;
+}
+
+/* Scale the final gravity-only result, so geometric gravity and the inverted
+   contribution cannot restore an axis the user has weakened or disabled.
+   Motion/wind remain in target-configured; the unit setting takes the exact
+   established path, including its limit ordering and floating-point math. */
+static void body_chain_shape_penis_gravity(int person,body_chain_person_state_t *state,
+    const body_chain_physics_config_t *cfg,DWORD now,float dt,
+    const float configured[3][3],float target[3][3])
+{
+    float gravity[3][3];int j,a;
+    static DWORD last_log[4];
+    if (cfg->gravity_horizontal_strength == 1.0f && cfg->gravity_vertical_strength == 1.0f) {
+        body_chain_shape_gravity(person,state,cfg,now,dt,configured,target);
+        return;
+    }
+    memcpy(gravity,configured,sizeof(gravity));
+    body_chain_shape_gravity(person,state,cfg,now,dt,configured,gravity);
+    for (j=0;j<3;j++) for (a=0;a<3;a++) {
+        float strength=1.0f;
+        if (a==physics_environment_cfg.gravity_horizontal_tail_axis)
+            strength*=cfg->gravity_horizontal_strength;
+        if (a==physics_environment_cfg.gravity_vertical_tail_axis)
+            strength*=cfg->gravity_vertical_strength;
+        target[j][a]=body_chain_clamp_link_axis_angle(cfg,j,a,
+            target[j][a]-configured[j][a]+gravity[j][a]*strength);
+    }
+    body_chain_limit_total_rotation(cfg,target,NULL,3);
+    if (defaults_cfg.debug && (!last_log[person] || now-last_log[person]>=1000)) {
+        last_log[person]=now;
+        log_line("body-chain gravity-strength person=Person%02d strength=(h=%.3f,v=%.3f) geometry=%d gravity01=(%.4f,%.4f,%.4f) target01=(%.4f,%.4f,%.4f)",
+            person+1,cfg->gravity_horizontal_strength,cfg->gravity_vertical_strength,
+            state->dynamics_gravity_active,gravity[0][0],gravity[0][1],gravity[0][2],
+            target[0][0],target[0][1],target[0][2]);
+    }
 }
 
 static int body_chain_release_runtime_ownership_for_person(
@@ -1789,6 +1830,46 @@ static int body_chain_reactivation_collision_grace_active(
     return 1;
 }
 
+static void body_chain_rebase_confirmed_gravity(body_chain_person_state_t *state)
+{
+    if (!state->gravity_sample.accepted || !state->gravity_sample.accepted_jump ||
+        state->gravity_camera_hold_active) return;
+    /* The probe has now computed the new pose's mapped drive. Seed from that
+       drive on the next filter update, instead of blending from the old pose.
+       Do not reset spring angles/velocities, contacts or the neutral reference. */
+    state->gravity_drive_filtered_valid=0;
+    state->gravity_sample.accepted_jump=0;
+}
+
+static void body_update_record_publish(int person_index, int system, DWORD now, int rate)
+{
+    static const char *names[] = { "penis", "testicles", "breasts", "butt" };
+    static struct { DWORD start; unsigned int count; int active, rate; } samples[4][4];
+    DWORD elapsed;
+    if (!defaults_cfg.performance_profile) {
+        samples[system][person_index].active = 0;
+        return;
+    }
+    elapsed = now - samples[system][person_index].start;
+    if (!samples[system][person_index].active ||
+        samples[system][person_index].rate != rate || elapsed > 10000) {
+        samples[system][person_index].start = now;
+        samples[system][person_index].count = 0;
+        samples[system][person_index].active = 1;
+        samples[system][person_index].rate = rate;
+        return;
+    }
+    samples[system][person_index].count++;
+    if (elapsed >= 5000) {
+        log_line("performance profile body-update person=Person%02d system=%s update_rate_hz=%d published_hz=%.1f sample_ms=%lu",
+            person_index + 1, names[system], rate,
+            samples[system][person_index].count * 1000.0 / elapsed,
+            (unsigned long)elapsed);
+        samples[system][person_index].start = now;
+        samples[system][person_index].count = 0;
+    }
+}
+
 static void run_body_chain_physics_for_person(int person_index, DWORD now)
 {
     const char *person = body_chain_person_name(person_index);
@@ -1849,9 +1930,12 @@ static void run_body_chain_physics_for_person(int person_index, DWORD now)
             (DWORD)PENIS_PHYSICS_MISSING_RETRY_MS) {
         return;
     }
-    if (state->last_tick &&
-        now - state->last_tick < (DWORD)body_chain_physics_cfg.interval_ms) return;
-    elapsed_ms = state->last_tick ? now - state->last_tick : 0;
+    if (!body_update_due(&state->update_clock, body_chain_physics_cfg.update_rate_hz,
+            body_chain_physics_cfg.interval_ms, state->last_tick, now,
+            body_update_frame_us)) return;
+    elapsed_ms = body_update_elapsed(&state->update_clock,
+        body_chain_physics_cfg.update_rate_hz, state->last_tick, now,
+        body_update_frame_us);
     dt = body_motion_duration(elapsed_ms);
     int motion_steps = body_motion_substeps(dt), motion_step;
     float motion_dt = dt / (float)motion_steps;
@@ -2342,6 +2426,7 @@ static void run_body_chain_physics_for_person(int person_index, DWORD now)
         person, state, root_raw, root, now,
         body_chain_active_gravity_cache(person_index, 0),
         "penis_physics");
+    body_chain_rebase_confirmed_gravity(state);
     physx_perf_add(PHYSX_PERF_PENIS_GRAVITY, perf_section_start);
     if (camera_test_isolation) {
         clear_body_chain_collision_for_test(state);
@@ -2549,7 +2634,7 @@ static void run_body_chain_physics_for_person(int person_index, DWORD now)
                 &body_chain_physics_cfg, target, NULL, 3);
 
             body_chain_limit_total_rotation(&body_chain_physics_cfg,gravity_target,NULL,3);
-            body_chain_shape_gravity(person_index,state,&body_chain_physics_cfg,
+            body_chain_shape_penis_gravity(person_index,state,&body_chain_physics_cfg,
                 now,motion_dt,gravity_target,target);
             for (i = 0; i < 3; i++) {
                 for (axis = 0; axis < 3; axis++) {
@@ -2634,6 +2719,7 @@ static void run_body_chain_physics_for_person(int person_index, DWORD now)
     if (runtime_mode) {
         body_chain_publish_runtime_pose(person_index, 0, out);
     }
+    body_update_record_publish(person_index, 0, now, body_chain_physics_cfg.update_rate_hz);
     if (defaults_cfg.debug &&
         (!state->last_log_tick || now - state->last_log_tick >= 1000)) {
         state->last_log_tick = now;
@@ -2853,11 +2939,10 @@ static void run_testicle_physics_for_person(int person_index, DWORD now)
             (DWORD)TESTICLE_PHYSICS_MISSING_RETRY_MS) {
         return;
     }
-    if (state->last_tick &&
-        now - state->last_tick < (DWORD)cfg->interval_ms) {
-        return;
-    }
-    elapsed_ms = state->last_tick ? now - state->last_tick : 0;
+    if (!body_update_due(&state->update_clock, cfg->update_rate_hz,
+            cfg->interval_ms, state->last_tick, now, body_update_frame_us)) return;
+    elapsed_ms = body_update_elapsed(&state->update_clock, cfg->update_rate_hz,
+        state->last_tick, now, body_update_frame_us);
     dt = body_motion_duration(elapsed_ms);
     int motion_steps = body_motion_substeps(dt), motion_step;
     float motion_dt = dt / (float)motion_steps;
@@ -3282,6 +3367,7 @@ static void run_testicle_physics_for_person(int person_index, DWORD now)
         person, state, root_raw, root, now,
         body_chain_active_gravity_cache(person_index, 1),
         "testicle_physics");
+    body_chain_rebase_confirmed_gravity(state);
     if (physics_environment_cfg.gravity_apply_to_body_chain &&
         physics_environment_cfg.world_gravity_probe &&
         (!state->gravity_probe_promoted ||
@@ -3494,6 +3580,7 @@ static void run_testicle_physics_for_person(int person_index, DWORD now)
     if (runtime_mode) {
         body_chain_publish_runtime_pose(person_index, 1, out);
     }
+    body_update_record_publish(person_index, 1, now, cfg->update_rate_hz);
     if (defaults_cfg.debug &&
         (!state->last_log_tick || now - state->last_log_tick >= 1000)) {
         state->last_log_tick = now;
@@ -3588,9 +3675,9 @@ static int body_collider_person_physics_due(int person_index, DWORD now)
          breasts_physics_cfg.room_collision_enabled)) {
         breasts_physics_person_state_t *state =
             &breasts_physics_states[person_index];
-        if (!state->last_tick ||
-            now - state->last_tick >=
-                (DWORD)breasts_physics_cfg.interval_ms) {
+        if (body_update_due(&state->update_clock, breasts_physics_cfg.update_rate_hz,
+                breasts_physics_cfg.interval_ms, state->last_tick, now,
+                body_update_frame_us)) {
             due = 1;
         }
     }
@@ -3599,9 +3686,9 @@ static int body_collider_person_physics_due(int person_index, DWORD now)
          butt_physics_cfg.room_collision_enabled)) {
         breasts_physics_person_state_t *state =
             &butt_physics_states[person_index];
-        if (!state->last_tick ||
-            now - state->last_tick >=
-                (DWORD)butt_physics_cfg.interval_ms) {
+        if (body_update_due(&state->update_clock, butt_physics_cfg.update_rate_hz,
+                butt_physics_cfg.interval_ms, state->last_tick, now,
+                body_update_frame_us)) {
             due = 1;
         }
     }
@@ -3611,9 +3698,9 @@ static int body_collider_person_physics_due(int person_index, DWORD now)
          body_chain_physics_cfg.room_collision_enabled)) {
         body_chain_person_state_t *state =
             body_chain_active_person_state(person_index, 0);
-        if (!state->last_tick ||
-            now - state->last_tick >=
-                (DWORD)body_chain_physics_cfg.interval_ms) {
+        if (body_update_due(&state->update_clock, body_chain_physics_cfg.update_rate_hz,
+                body_chain_physics_cfg.interval_ms, state->last_tick, now,
+                body_update_frame_us)) {
             due = 1;
         }
     }
@@ -3624,9 +3711,9 @@ static int body_collider_person_physics_due(int person_index, DWORD now)
          testicle_physics_cfg.room_collision_enabled)) {
         body_chain_person_state_t *state =
             body_chain_active_person_state(person_index, 1);
-        if (!state->last_tick ||
-            now - state->last_tick >=
-                (DWORD)testicle_physics_cfg.interval_ms) {
+        if (body_update_due(&state->update_clock, testicle_physics_cfg.update_rate_hz,
+                testicle_physics_cfg.interval_ms, state->last_tick, now,
+                body_update_frame_us)) {
             due = 1;
         }
     }
@@ -5499,6 +5586,56 @@ static void breasts_physics_add_gravity_target(
     }
 }
 
+static float paired_body_duration(int rate, unsigned int elapsed_ms)
+{
+    float dt;
+    if (rate) return body_motion_duration(elapsed_ms);
+    dt = elapsed_ms ? (float)elapsed_ms / 1000.0f : 0.016f;
+    if (dt <= 0.0f) dt = 0.016f;
+    if (dt > 0.025f) dt = 0.025f;
+    return dt;
+}
+
+static void paired_body_scale_motion(int rate, unsigned int elapsed_ms,
+    float local_step[3], float rotation_step[3])
+{
+    int axis;
+    float scale;
+    if (!rate) return;
+    /* Preserve the established 16 ms movement gain before mapping/deadzones.
+       Gravity, wind and constant sag are forces, not sampled displacements. */
+    scale = body_motion_input_scale(elapsed_ms);
+    for (axis = 0; axis < 3; axis++) {
+        local_step[axis] *= scale;
+        rotation_step[axis] *= scale;
+    }
+}
+
+static void paired_body_rotation_step(const body_chain_physics_config_t *cfg,
+    float rotation[3], float velocity[3], const float target[3], float dt)
+{
+    int axis, step;
+    int steps = cfg->update_rate_hz ? body_motion_substeps(dt) : 1;
+    float step_dt = dt / steps;
+    if (!cfg->update_rate_hz) {
+        for (axis = 0; axis < 3; axis++) {
+            float acceleration = (target[axis] - rotation[axis]) * cfg->stiffness -
+                velocity[axis] * cfg->damping;
+            velocity[axis] += acceleration * dt;
+            rotation[axis] += velocity[axis] * dt;
+            rotation[axis] = body_chain_clamp_link_axis_angle(cfg, 0, axis, rotation[axis]);
+        }
+        return;
+    }
+    for (axis = 0; axis < 3; axis++) {
+        for (step = 0; step < steps; step++) {
+            body_motion_spring_step(&rotation[axis], &velocity[axis],
+                target[axis], cfg->stiffness, cfg->damping, step_dt);
+            rotation[axis] = body_chain_clamp_link_axis_angle(cfg, 0, axis, rotation[axis]);
+        }
+    }
+}
+
 static void run_breasts_physics_for_person(int person_index, DWORD now)
 {
     const char *person = body_chain_person_name(person_index);
@@ -5547,13 +5684,12 @@ static void run_breasts_physics_for_person(int person_index, DWORD now)
     if (!state->initialized && state->resolve_retry_tick &&
         now - state->resolve_retry_tick <
             (DWORD)BREASTS_PHYSICS_MISSING_RETRY_MS) return;
-    if (state->last_tick &&
-        now - state->last_tick < (DWORD)cfg->interval_ms) return;
-    elapsed_ms = state->last_tick ? now - state->last_tick : 0;
+    if (!body_update_due(&state->update_clock, cfg->update_rate_hz,
+            cfg->interval_ms, state->last_tick, now, body_update_frame_us)) return;
+    elapsed_ms = body_update_elapsed(&state->update_clock, cfg->update_rate_hz,
+        state->last_tick, now, body_update_frame_us);
     state->last_tick = now;
-    dt = elapsed_ms ? (float)elapsed_ms / 1000.0f : 0.016f;
-    if (dt <= 0.0f) dt = 0.016f;
-    if (dt > 0.025f) dt = 0.025f;
+    dt = paired_body_duration(cfg->update_rate_hz, elapsed_ms);
 
     if (state->initialized && state->cache_verify_tick &&
         now - state->cache_verify_tick <
@@ -5697,6 +5833,8 @@ static void run_breasts_physics_for_person(int person_index, DWORD now)
         cfg->root_offset,
         breasts_physics_active_axis_reference_cache(person_index),
         local_step);
+    paired_body_scale_motion(cfg->update_rate_hz, elapsed_ms,
+        local_step, parent_rotation_step);
     for (channel = 0; channel < 3; channel++) {
         translation_step[channel] =
             local_step[cfg->translation_source_axis[channel]];
@@ -5779,18 +5917,8 @@ static void run_breasts_physics_for_person(int person_index, DWORD now)
                 cfg, 0, axis,
                 target[side][axis] * cfg->link_gain[0]);
         }
-        for (axis = 0; axis < 3; axis++) {
-            float acceleration =
-                (target[side][axis] - state->rotation[side][axis]) *
-                    cfg->stiffness -
-                state->angular_velocity[side][axis] * cfg->damping;
-            state->angular_velocity[side][axis] += acceleration * dt;
-            state->rotation[side][axis] +=
-                state->angular_velocity[side][axis] * dt;
-            state->rotation[side][axis] =
-                body_chain_clamp_link_axis_angle(
-                    cfg, 0, axis, state->rotation[side][axis]);
-        }
+        paired_body_rotation_step(cfg, state->rotation[side],
+            state->angular_velocity[side], target[side], dt);
     }
     /* Free translation targets remain independent of contact recovery. */
     for (side = 0; side < 2; side++) {
@@ -5817,6 +5945,7 @@ static void run_breasts_physics_for_person(int person_index, DWORD now)
         memset(state->bone_translation_velocity,0,sizeof(state->bone_translation_velocity));
     }
     breasts_physics_apply_output(state, 0, 0);
+    body_update_record_publish(person_index, 2, now, cfg->update_rate_hz);
     if (!state->active_logged) {
         state->active_logged = 1;
         log_line("breasts-physics active person=\"%s\" motion_source=\"spine_joint04\" gravity_source=\"root\" targets=\"breast_scale_L_joint,breast_scale_R_joint\" translation_axes=(%d->%d,%d->%d,%d->%d) rotation_axes=(%d->%d,%d->%d,%d->%d) gravity=(strength=%.2f,axes=%d,%d,%d,inverted_strength=%.2f,inverted_sign=%.2f,inward_outward_axis=%d,inward_strength=%.2f,outward_strength=%.2f) spring=(%.2f,%.2f) collision=(enabled=%d,scope=%s) bone_translation=(enabled=%d,space=%s,offset=0x%03x,axes=%d->%d/%d->%d/%d->%d,scale=%.3f/%.3f/%.3f,gravity_sag=%.4f,stiffness=%.2f,damping=%.2f,max=%.4f/%.4f/%.4f) note=\"shared settings; upper-spine motion includes inherited whole-body movement and torso-only animation; canonical root gravity preserves established orientation channels; two independent single-bone rotation and translation springs; world-gravity sag and body-space movement are converted into each breast parent's local basis\"",

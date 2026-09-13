@@ -1,3 +1,5 @@
+#include "physx_collision_profile.h"
+
 static int body_collider_draw_view_point(const float stored[3], float out[3])
 {
     if (!stored || !out) return 0;
@@ -2536,6 +2538,7 @@ static void update_body_chain_colliders_for_person_scope(
     int person_index, DWORD now, int required_scope_mask)
 {
     static DWORD refresh_tick[4];
+    static DWORD refresh_serial[4];
     static int refresh_tick_valid[4];
     static int refresh_scope_mask[4];
     body_chain_collider_person_state_t *state;
@@ -2555,12 +2558,14 @@ static void update_body_chain_colliders_for_person_scope(
     }
     if (refresh_tick_valid[person_index] &&
         refresh_tick[person_index] == now &&
+        (!body_update_precise_frame || refresh_serial[person_index] == physx_simulation_serial) &&
         (refresh_scope_mask[person_index] & required_scope_mask) ==
             required_scope_mask) {
         return;
     }
     refresh_tick_valid[person_index] = 1;
     refresh_tick[person_index] = now;
+    refresh_serial[person_index] = physx_simulation_serial;
     refresh_scope_mask[person_index] = required_scope_mask;
     state = &body_chain_collider_states[person_index];
     state->active_scope_mask = required_scope_mask;
@@ -4410,6 +4415,7 @@ static void body_chain_compute_collider_projection(int person_index,
                                                    float *collider_motion_out,
                                                    int collision_target)
 {
+    COLLISION_PROFILE_SCOPE(profile_collection, CP_BODY_COLLECTION);
     static const char *passive_chain_names[3] = {
         "passive_chain_joint01_to_02",
         "passive_chain_joint02_to_03",
@@ -5329,6 +5335,7 @@ static void body_chain_compute_collider_projection(int person_index,
         chain_state->collision_multi_support_grace_ticks = 3;
     }
     solver_iterations = (int)physx_clampf((float)body_chain_collider_cfg.collision_iterations,1.0f,6.0f)*8;
+    COLLISION_PROFILE_END(profile_collection);
     body_contact_solve(target_is_testicle ? &testicle_physics_cfg : &body_chain_physics_cfg,
         chain_state, chain_points, contacts, contact_count, segment_count, correction);
     if (emit_log && contact_count && (defaults_cfg.debug || body_chain_collider_cfg.diagnostic) &&

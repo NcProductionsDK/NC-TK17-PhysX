@@ -5,6 +5,7 @@ root=Path(__file__).resolve().parent
 main=(root/'NC-TK17-PhysX.c').read_text()
 hooks=(root/'physx_hooks_core.c').read_text()
 sidecar=(root/'physx_sidecar.c').read_text()
+physics=(root/'physx_physics.c').read_text()
 def function(source,name):
     m=re.search(r'^static [^;{}]*\b'+name+r'\([^;{}]*\)\s*\{',source,re.M)
     if not m: raise ValueError(name)
@@ -35,12 +36,13 @@ static float physx_vec3_len(const float *v){return sqrtf(v[0]*v[0]+v[1]*v[1]+v[2
 static int sane_probe_float(float v){return isfinite(v);}
 static float physx_clampf(float x,float a,float b){return fminf(b,fmaxf(a,x));}
 static struct {int gravity_probe_camera_quiet_ms,body_chain_camera_quarantine_ms;float gravity_response_ms,gravity_max_degrees_per_second;} physics_environment_cfg={10,0,100,0};
-typedef struct {gravity_sample_t gravity_sample;float gravity_drive[3],gravity_drive_filtered[3];int gravity_drive_filtered_valid;} body_chain_person_state_t;
+typedef struct {gravity_sample_t gravity_sample;float gravity_drive[3],gravity_drive_filtered[3];int gravity_drive_filtered_valid,gravity_camera_hold_active;} body_chain_person_state_t;
 typedef struct {gravity_sample_t addon_gravity_sample;int addon_gravity_camera_hold_active,addon_gravity_camera_release_active,addon_gravity_trusted_valid;float addon_gravity_trusted_drive[3];} physx_chain_t;
 '''
 source+=function(main,'camera_rotation_delta')+function(main,'camera_world_to_view_direction')
 source+=function(hooks,'hook_AppTracker_SetWorldMatrixInverse')+function(main,'gravity_sample_live')
 source+=function(main,'update_body_chain_gravity_filter')+function(sidecar,'addon_chain_camera_safe_gravity_drive')
+source+=function(physics,'body_chain_rebase_confirmed_gravity')
 source+=r'''
 static void identity(float m[16]){memset(m,0,sizeof(float)*16);m[0]=m[5]=m[10]=m[15]=1;}
 static int sample(gravity_sample_t *s,const float *v,uint32_t f,uint32_t t,uint32_t camera,uint32_t age,float *out){return gravity_sample_update(s,1,v,1,f,t,camera,1,age,10,out);}
@@ -110,6 +112,57 @@ static void rates_and_filter(void){
  update_body_chain_gravity_filter(&b,.016f);assert(fabsf(b.gravity_drive_filtered[0]-.984f)<1e-6f);
  puts("PASS: smooth poses at 20/30/60/144 Hz; time-consistent smoothing; startup and zero-ms speed cap");
 }
+static void pose_rebase(void){
+ const float old[3]={-.05263f,0,-.99861f},pose[3]={-.98711f,-.04085f,.15475f};
+ const int rates[]={30,60,90,144};
+ physics_environment_cfg.gravity_response_ms=100;
+ physics_environment_cfg.gravity_max_degrees_per_second=500;
+ for(int r=0;r<4;r++){
+  body_chain_person_state_t b={0};float out[3];uint32_t step=1000/rates[r];
+  sample(&b.gravity_sample,old,1,1000,0,1000,out);
+  sample(&b.gravity_sample,old,2,1000+step,0,1000,out);
+  memcpy(b.gravity_drive,out,sizeof(out));
+  body_chain_rebase_confirmed_gravity(&b);update_body_chain_gravity_filter(&b,1.0f/rates[r]);
+  assert(!memcmp(b.gravity_drive_filtered,old,sizeof(out))&&!b.gravity_sample.accepted_jump);
+  sample(&b.gravity_sample,pose,3,1000+2*step,0,1000,out);
+  assert(!b.gravity_sample.accepted);
+  body_chain_rebase_confirmed_gravity(&b);
+  assert(b.gravity_drive_filtered_valid&&!memcmp(b.gravity_drive_filtered,old,sizeof(out)));
+  sample(&b.gravity_sample,pose,4,1000+3*step,0,1000,out);
+  assert(b.gravity_sample.accepted&&b.gravity_sample.accepted_jump);
+  memcpy(b.gravity_drive,out,sizeof(out));
+  body_chain_person_state_t legacy=b;update_body_chain_gravity_filter(&legacy,1.0f/rates[r]);
+  assert(fabsf(legacy.gravity_drive_filtered[2]-pose[2])>.5f);
+  /* Confirmation can arrive while the independent body hold is still active. */
+  b.gravity_camera_hold_active=1;body_chain_rebase_confirmed_gravity(&b);
+  assert(b.gravity_drive_filtered_valid&&b.gravity_sample.accepted_jump);
+  sample(&b.gravity_sample,pose,5,1000+4*step,0,1000,out);
+  b.gravity_camera_hold_active=0;body_chain_rebase_confirmed_gravity(&b);
+  update_body_chain_gravity_filter(&b,1.0f/rates[r]);
+  assert(!memcmp(b.gravity_drive_filtered,pose,sizeof(out))&&!b.gravity_sample.accepted_jump);
+  /* A repeated substep must not reseed the same event again. */
+  sample(&b.gravity_sample,pose,5,1000+4*step,0,1000,out);
+  body_chain_rebase_confirmed_gravity(&b);assert(b.gravity_drive_filtered_valid);
+  /* Rebinding confirms a fresh sample before replacing a cached old filter. */
+  gravity_sample_update(&b.gravity_sample,2,old,1,6,1000+5*step,0,1,1000,10,out);
+  body_chain_rebase_confirmed_gravity(&b);assert(b.gravity_drive_filtered_valid);
+  gravity_sample_update(&b.gravity_sample,2,old,1,7,1000+6*step,0,1,1000,10,out);
+  memcpy(b.gravity_drive,out,sizeof(out));body_chain_rebase_confirmed_gravity(&b);
+  update_body_chain_gravity_filter(&b,1.0f/rates[r]);
+  assert(!memcmp(b.gravity_drive_filtered,old,sizeof(out)));
+ }
+ /* Gradual animation retains smoothing, even across a large total rotation. */
+ for(int r=0;r<4;r++){
+  gravity_sample_t s={0};float out[3],v[3];int hz=rates[r];
+  for(int i=0;i<=2*hz;i++){
+   float angle=(float)i/hz;v[0]=sinf(angle);v[1]=-cosf(angle);v[2]=0;
+   sample(&s,v,i,1000+(uint32_t)(1000.0*i/hz),0,1000,out);
+   if(i==1){assert(s.accepted_jump);s.accepted_jump=0;}
+   if(i>1)assert(s.accepted&&!s.accepted_jump);
+  }
+ }
+ puts("PASS: logged pose jump rebases confirmed gravity at 30/60/90/144 Hz; holds, substeps, rebinding and gradual animation preserved");
+}
 static void sidecars(void){
  physx_chain_t c={0};float a[3]={0,-1,0},b[3]={0,1,0},out[3];DWORD t=captured_camera_change_tick+100;
  physx_simulation_serial++;assert(addon_chain_camera_safe_gravity_drive(&c,t,a,1,(void*)3,out));
@@ -121,7 +174,7 @@ static void sidecars(void){
  physx_simulation_serial++;addon_chain_camera_safe_gravity_drive(&c,t+80,b,1,(void*)3,out);assert(!c.addon_gravity_camera_hold_active&&out[1]==1);
  puts("PASS: sidecar warmup cannot switch fallback frames; invalid samples retain trusted force and reconfirm");
 }
-int main(void){protocol();cameras();rates_and_filter();sidecars();return 0;}
+int main(void){protocol();cameras();rates_and_filter();pose_rebase();sidecars();return 0;}
 '''
 build=root/'build';build.mkdir(exist_ok=True)
 c=build/'gravity_response_test.c';c.write_text(source)

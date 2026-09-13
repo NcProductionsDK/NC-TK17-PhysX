@@ -14,6 +14,7 @@ typedef struct gravity_sample_t {
     uint32_t pending_tick, pending_frame, pending_camera, last_frame, last_camera;
     uint32_t accepted_count, camera_count, waiting_count;
     int pending_valid, trusted_valid, processed, accepted, reason;
+    int accepted_jump; /* Latched until a consumer rebases; survives camera holds. */
 } gravity_sample_t;
 
 enum { GRAVITY_SAMPLE_ACCEPTED, GRAVITY_SAMPLE_CAMERA,
@@ -61,6 +62,18 @@ static int gravity_sample_update(gravity_sample_t *s, uintptr_t source,
         if (s->pending_valid && s->pending_camera == camera &&
             frame != s->pending_frame && now - s->pending_tick > 0u &&
             now - s->pending_tick <= 100u && agrees) {
+            float old_norm2=0,new_norm2=0,dot=0;
+            for (i=0;i<3;i++) {
+                old_norm2+=s->trusted[i]*s->trusted[i];
+                new_norm2+=s->pending[i]*s->pending[i];
+                dot+=s->trusted[i]*s->pending[i];
+            }
+            /* Only a confirmed direction change, not an untrusted candidate.
+               A >30 degree jump marks a pose discontinuity; ordinary animated
+               motion still uses the caller's configured physical smoothing. */
+            s->accepted_jump |= !s->trusted_valid ||
+                (old_norm2>1e-8f && new_norm2>1e-8f &&
+                 dot < .8660254f*sqrtf(old_norm2*new_norm2));
             memcpy(s->trusted, s->pending, sizeof(s->trusted));
             s->trusted_valid = s->accepted = 1;
             s->reason = GRAVITY_SAMPLE_ACCEPTED;

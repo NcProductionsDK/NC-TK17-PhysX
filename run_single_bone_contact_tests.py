@@ -209,5 +209,5 @@ build=ROOT/'build';build.mkdir(exist_ok=True)
 c=build/'single_bone_contact_test.c';c.write_text(source)
 gcc=Path(r'C:\msys64\mingw32\bin\gcc.exe');env=dict(os.environ,PATH=str(gcc.parent)+os.pathsep+os.environ['PATH'])
 exe=build/'single_bone_contact_test.exe'
-subprocess.run([str(gcc),'-m32','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-misleading-indentation','-static-libgcc','-o',str(exe),str(c)],env=env,check=True)
+subprocess.run([str(gcc),'-m32', '-include', str(ROOT / 'physx_collision_profile.h'),'-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-misleading-indentation','-static-libgcc','-o',str(exe),str(c)],env=env,check=True)
 subprocess.run([str(exe)],env=env,check=True,timeout=60)

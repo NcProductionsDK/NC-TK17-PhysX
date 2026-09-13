@@ -14,6 +14,7 @@
 #include "physx_contact_math.h"
 #include "physx_body_pose.h"
 #include "physx_body_motion.h"
+#include "physx_body_update.h"
 #include "physx_body_dynamics.h"
 #include "physx_gravity_sample.h"
 #include "physx_single_bone_contact.h"
@@ -864,6 +865,8 @@ typedef struct body_chain_physics_config_t {
     float gravity_angle;
     float gravity_horizontal_curve;
     float gravity_vertical_curve;
+    float gravity_horizontal_strength; /* Penis-only final gravity multipliers. */
+    float gravity_vertical_strength;
     float gravity_inverted_strength;
     int gravity_inverted_tail_axis;
     float gravity_inverted_sign;
@@ -876,6 +879,7 @@ typedef struct body_chain_physics_config_t {
     float link_min_angle[3][3];
     float link_gain[3];
     int interval_ms;
+    int update_rate_hz; /* 0 legacy, -1 render rate, 1..240 target Hz. */
     int zero_output_rest;
     /* Public paired-body controls. Penis/testicle configs leave these
        unused; breasts and butt copy and overlay them per selected body. */
@@ -1076,6 +1080,7 @@ typedef struct body_chain_collider_person_state_t {
 
 typedef struct body_chain_person_state_t {
     DWORD last_tick;
+    body_update_clock_t update_clock;
     DWORD resolve_retry_tick;
     DWORD init_tick;
     int initialized;
@@ -1277,6 +1282,7 @@ typedef struct breasts_physics_person_state_t {
     float gravity_relative[3];
     float animation_rows[2][9];
     DWORD last_tick;
+    body_update_clock_t update_clock;
     DWORD resolve_retry_tick;
     DWORD ownership_candidate_tick;
     DWORD cache_verify_tick;
@@ -2144,6 +2150,8 @@ static body_chain_physics_config_t body_chain_physics_global_cfg = {
     .gravity_angle = 0.0f,
     .gravity_horizontal_curve = 1.0f,
     .gravity_vertical_curve = 1.0f,
+    .gravity_horizontal_strength = 1.0f,
+    .gravity_vertical_strength = 1.0f,
     .gravity_inverted_strength = 30.0f,
     .gravity_inverted_tail_axis = 2,
     .gravity_inverted_sign = -1.0f,
@@ -3300,6 +3308,40 @@ static int sidecar_count;
 static DWORD last_update_tick;
 static DWORD last_sim_tick;
 static DWORD physx_simulation_serial;
+static uint64_t body_update_frame_us;
+static int body_update_precise_frame;
+
+static void body_update_prepare_frame(DWORD now)
+{
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    int i;
+    body_update_precise_frame = 0;
+    for (i = 0; i < 4; i++) {
+        const body_chain_physics_config_t *penis = &body_chain_physics_person_cfg[i];
+        const body_chain_physics_config_t *testicle = &testicle_physics_person_cfg[i];
+        const body_chain_physics_config_t *breasts = &breasts_physics_person_cfg[i];
+        const body_chain_physics_config_t *butt = &butt_physics_person_cfg[i];
+        if ((penis->enabled && penis->enabled_person[i] && penis->update_rate_hz) ||
+            (testicle->enabled && testicle->enabled_person[i] && testicle->update_rate_hz) ||
+            (breasts->enabled && breasts->enabled_person[i] && breasts->update_rate_hz) ||
+            (butt->enabled && butt->enabled_person[i] && butt->update_rate_hz)) {
+            body_update_precise_frame = 1;
+            break;
+        }
+    }
+    if (!body_update_precise_frame) return;
+    /* One shared precise sample per render frame. Keep lifecycle, ownership
+       and other physics timestamps in their existing GetTickCount domain. */
+    if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+    if (frequency.QuadPart > 0 && QueryPerformanceCounter(&counter)) {
+        body_update_frame_us = (uint64_t)(counter.QuadPart / frequency.QuadPart) * 1000000u +
+            (uint64_t)(counter.QuadPart % frequency.QuadPart) * 1000000u / frequency.QuadPart;
+    } else {
+        /* A clock discontinuity is safely rebased by the per-chain scheduler. */
+        body_update_frame_us = (uint64_t)now * 1000u;
+    }
+}
 static volatile LONG physx_late_ownership_active;
 static app_find_objc_t engine_FindObjC;
 static app_engine_t engine_AppMainEngine;
@@ -3696,7 +3738,8 @@ static int normal_log_line_allowed(const char *fmt)
     if (!fmt || !fmt[0]) return 0;
     if (defaults_cfg.debug) return 1;
     if (defaults_cfg.performance_profile &&
-        normal_log_starts_with(fmt, "performance profile ")) {
+        (normal_log_starts_with(fmt, "performance profile ") ||
+         normal_log_starts_with(fmt, "collision profile "))) {
         return 1;
     }
 
@@ -3775,15 +3818,20 @@ static int gravity_response_trace_due(DWORD now, DWORD *last)
     return 1;
 }
 
+#define PHYSX_COLLISION_PROFILE_ENABLED 1
+#include "physx_collision_profile.h"
+
 static void physx_perf_prepare(DWORD now)
 {
     if (!defaults_cfg.performance_profile) {
+        if (collision_profile_state.enabled) collision_profile_clear();
         if (physx_perf_state.ready) {
             memset(&physx_perf_state, 0, sizeof(physx_perf_state));
         }
         return;
     }
     if (!physx_perf_state.ready) {
+        collision_profile_clear();
         memset(&physx_perf_state, 0, sizeof(physx_perf_state));
         if (!QueryPerformanceFrequency(&physx_perf_state.frequency) ||
             physx_perf_state.frequency.QuadPart <= 0) {
@@ -3792,6 +3840,7 @@ static void physx_perf_prepare(DWORD now)
         physx_perf_state.report_tick = now;
         physx_perf_state.ready = 1;
     }
+    collision_profile_state.enabled = physx_perf_state.ready;
 }
 
 static LONGLONG physx_perf_counter(void)
@@ -3899,6 +3948,9 @@ static void physx_perf_report(DWORD now)
                  (unsigned long)physx_perf_state.calls[PHYSX_PERF_ADDON_SELF_COLLISION],
                  (unsigned long)physx_perf_state.calls[PHYSX_PERF_ADDON_ADDONS_COLLISION]);
     }
+    collision_profile_report(window_ms, frames, physx_perf_state.frequency.QuadPart);
+    collision_profile_clear();
+    collision_profile_state.enabled = 1;
     memset(physx_perf_state.accumulated, 0,
            sizeof(physx_perf_state.accumulated));
     memset(physx_perf_state.maximum, 0,
@@ -8731,6 +8783,7 @@ static unsigned int reset_body_chain_person_state(
     if (!state) return 0;
     restored_pose_track_mask = restore_poseeditor_joint01_track(state);
     state->last_tick = 0;
+    memset(&state->update_clock, 0, sizeof(state->update_clock));
     state->resolve_retry_tick = 0;
     state->initialized = 0;
     state->active_logged = 0;
@@ -10548,6 +10601,7 @@ static void physx_tick(void)
     phase_start = physx_perf_counter();
     update_targets(now);
     body_profile_probe_runtime_bindings(now);
+    body_update_prepare_frame(now);
     physx_perf_add(PHYSX_PERF_BINDINGS, phase_start);
 
     phase_start = physx_perf_counter();

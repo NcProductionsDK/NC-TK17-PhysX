@@ -1,3 +1,5 @@
+#include "physx_collision_profile.h"
+
 /* Included by physx_sidecar.c; pure candidate-pose operations never publish
    engine transforms. Positions are in the frozen wearer's body frame. */
 typedef struct {
@@ -80,6 +82,7 @@ static int physx_chain_contact_store(physx_contact_set_t *set,float points[][3],
 static float physx_chain_contact_gradient(physx_chain_t *chain,
     physx_chain_contact_pose_t *pose,float t,const float normal[3],float gradient[32][3])
 {
+    COLLISION_PROFILE_COUNT(CP_ADDON_GRADIENTS, 1);
     float norm2=0;
     int i,j,k;
     for(i=1;i<=pose->last;i++) {
@@ -114,6 +117,8 @@ static int physx_chain_contact_solve(physx_chain_t *chain,physx_chain_contact_po
     const physx_contact_set_t *contacts,const float points[][3],
     const float start[3],const float end[3])
 {
+    COLLISION_PROFILE_SCOPE(profile_solve, CP_ADDON_COHERENT_SOLVE);
+    COLLISION_PROFILE_COUNT(CP_ADDON_CONTACTS, contacts->count);
     float t[PHYSX_CONTACT_CAPACITY],goal[PHYSX_CONTACT_CAPACITY],segment[3],len2;
     float gradient[32][3],spent[32]={0};
     int i,j,c,iteration,moved=0;
@@ -127,6 +132,7 @@ static int physx_chain_contact_solve(physx_chain_t *chain,physx_chain_contact_po
         goal[c]=vec3_dot(points[c],contacts->normal[c])+0.55f*contacts->penetration[c];
     }
     for(iteration=0;iteration<6;iteration++) {
+        COLLISION_PROFILE_COUNT(CP_ADDON_PASSES, 1);
         int changed=0;
         for(c=0;c<contacts->count;c++) {
             float point[3],residual,norm2,scale=1.0f;

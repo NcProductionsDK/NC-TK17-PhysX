@@ -1,3 +1,5 @@
+#include "physx_collision_profile.h"
+
 static int anchor_vector_offset_for_name(const char *name)
 {
     if (!name || !name[0]) return -1;
@@ -13677,6 +13679,7 @@ static int addon_chain_apply_visible_body_correction(
     const float sample_point[3], float sample_movement[3], int *sample_joints,
     const float response_point[3])
 {
+    COLLISION_PROFILE_SCOPE(profile_visible, CP_ADDON_VISIBLE_SOLVE);
     float pivots[32][3], weights[32], total = 0.0f;
     int i, axis, first, last, applied = 0;
     body_chain_collider_person_state_t *state;
@@ -13754,6 +13757,7 @@ static int addon_chain_apply_body_collision(
     float dt,
     int terminal_segment)
 {
+    COLLISION_PROFILE_SCOPE(profile_query, CP_ADDON_PREPARE_QUERY);
     body_chain_collider_person_state_t *chain_frame;
     body_chain_collider_person_state_t *state;
     float end[3];
@@ -14120,6 +14124,7 @@ static int addon_chain_apply_body_collision(
         memset(target->contact_response_request,0,sizeof(target->contact_response_request));
         lstrcpynA(target->contact_response_feature,trace.collider,sizeof(target->contact_response_feature));
     }
+    COLLISION_PROFILE_END(profile_query);
     addon_chain_body_manifold_resolve(&manifold, correction);
     if (hit_count > 0 && manifold.contacts.count > 0) {
         float stable_normal[3];

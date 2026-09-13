@@ -22,7 +22,7 @@ def use_production_lengths(fixture):
 
 def run_test(source, name):
     exe = build / (name + '.exe')
-    subprocess.run([str(gcc), '-m32', '-O2', '-Wall', '-Wextra',
+    subprocess.run([str(gcc), '-m32', '-include', str(root / 'physx_collision_profile.h'), '-O2', '-Wall', '-Wextra',
                     '-Werror', '-Wno-unused-function', '-static-libgcc',
                     '-I', str(root), '-o', str(exe), str(source)],
                    env=env, check=True)
