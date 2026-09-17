@@ -9,12 +9,13 @@
 typedef struct single_bone_contacts_t {
     int count;
     float n[SINGLE_BONE_CONTACTS][3], bound[SINGLE_BONE_CONTACTS];
+    float strength[SINGLE_BONE_CONTACTS];
 } single_bone_contacts_t;
 
 static float single_bone_dot(const float a[3],const float b[3])
 { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
 
-static void single_bone_store(single_bone_contacts_t *s,const float n[3],float bound)
+static void single_bone_store_strength(single_bone_contacts_t *s,const float n[3],float bound,float strength)
 {
     int i,slot;
     float len=sqrtf(single_bone_dot(n,n));
@@ -22,12 +23,30 @@ static void single_bone_store(single_bone_contacts_t *s,const float n[3],float b
     if(!isfinite(len) || len<1e-6f || !isfinite(bound)) return;
     for(i=0;i<3;i++) unit[i]=n[i]/len;
     bound/=len;
-    for(i=0;i<s->count;i++) if(single_bone_dot(unit,s->n[i])>.9999f) {
+    for(i=0;i<s->count;i++) if(s->strength[i]==strength && single_bone_dot(unit,s->n[i])>.9999f) {
         if(bound>s->bound[i]) s->bound[i]=bound;
         return;
     }
     if(s->count>=SINGLE_BONE_CONTACTS) return;
     slot=s->count++;memcpy(s->n[slot],unit,sizeof(unit));s->bound[slot]=bound;
+    s->strength[slot]=strength;
+}
+
+static void single_bone_store(single_bone_contacts_t *s,const float n[3],float bound)
+{ single_bone_store_strength(s,n,bound,1.0f); }
+
+/* Anchor soft contacts to the collision-free spring target. Anchoring to the
+   current prediction would accumulate near-full separation over many frames. */
+static void single_bone_world_plane_strength(single_bone_contacts_t *s,
+    const float matrix[9],const float normal[3],float depth,
+    const float position[3],const float free_target[3],float strength)
+{
+    float n[3],bound;int a;
+    for(a=0;a<3;a++) n[a]=single_bone_dot(matrix+3*a,normal);
+    bound=single_bone_dot(n,position)+depth;
+    if(strength<1.0f)
+        bound=single_bone_dot(n,free_target)+strength*(bound-single_bone_dot(n,free_target));
+    single_bone_store_strength(s,n,bound,strength);
 }
 
 /* A local displacement dx moves the sphere by dx * parent_to_world.
@@ -90,7 +109,8 @@ static void single_bone_velocity(const single_bone_contacts_t *s,
     single_bone_contacts_t active={0};float lo[3],hi[3];int a,i;
     for(i=0;i<s->count;i++)
         if(single_bone_dot(s->n[i],position)-s->bound[i]<2e-5f)
-            single_bone_store(&active,s->n[i],0);
+            single_bone_store(&active,s->n[i],
+                s->strength[i]<1.0f ? (1.0f-s->strength[i])*fminf(0,single_bone_dot(s->n[i],velocity)) : 0);
     for(a=0;a<3;a++) {
         lo[a]=position[a]<=-limit[a]+1e-6f?0:-1000;
         hi[a]=position[a]>=limit[a]-1e-6f?0:1000;

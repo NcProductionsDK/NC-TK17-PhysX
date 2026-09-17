@@ -4476,6 +4476,7 @@ static void body_chain_compute_collider_projection(int person_index,
     int collision_scope_is_full_body;
     float owner_chain_radius;
     float owner_collision_slop;
+    float owner_collision_strength;
     const float contact_soft_margin = 0.0020f;
     const float sweep_activation_move = 0.0180f;
 
@@ -4517,6 +4518,8 @@ static void body_chain_compute_collider_projection(int person_index,
     }
     owner_chain_radius = body_chain_collider_cfg.chain_radius;
     owner_collision_slop = body_chain_collider_cfg.collision_slop;
+    owner_collision_strength = target_is_testicle ?
+        testicle_physics_cfg.collision_strength : body_chain_physics_cfg.collision_strength;
     if ((!body_chain_collider_cfg.enabled || !body_response_enabled) &&
         !room_response_enabled) {
         return;
@@ -4773,7 +4776,8 @@ static void body_chain_compute_collider_projection(int person_index,
             body_chain_store_contact(contacts, &contact_count, \
                 BODY_CHAIN_MAX_CONTACTS, (SEG_INDEX), (SEG_T_VALUE), \
                 penetration, closest_chain_value, closest_body_value, \
-                normal); \
+                normal, collider_person_index >= 0 && collider_person_index != person_index ? \
+                    owner_collision_strength : 1.0f); \
         } \
     } while (0)
 

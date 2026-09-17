@@ -37,45 +37,9 @@ static physx_gl_line_width_t physx_gl_line_width;
 static int physx_gl_debug_api_attempted;
 static DWORD d3d_chain_draw_log_tick[4];
 static DWORD gl_chain_draw_log_tick[4];
-static HDC body_chain_gdi_debug_hdc;
-static int body_chain_gdi_debug_mode;
-static int body_chain_gdi_debug_primitives;
-static HWND body_chain_hook5_overlay_hwnd;
-static HDC body_chain_hook5_overlay_dc;
-static HBITMAP body_chain_hook5_overlay_bitmap;
-static HGDIOBJ body_chain_hook5_overlay_old_bitmap;
-static int body_chain_hook5_overlay_w;
-static int body_chain_hook5_overlay_h;
-
-static COLORREF body_chain_gdi_color(DWORD color)
-{
-    return RGB((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff);
-}
-
-static void body_chain_gdi_select_pen(COLORREF color,
-                                      HPEN *pen_out,
-                                      HGDIOBJ *old_pen_out)
-{
-    HPEN pen;
-    if (pen_out) *pen_out = NULL;
-    if (old_pen_out) *old_pen_out = NULL;
-    if (!body_chain_gdi_debug_hdc) return;
-    pen = CreatePen(PS_SOLID, 2, color);
-    if (!pen) return;
-    if (pen_out) *pen_out = pen;
-    if (old_pen_out) {
-        *old_pen_out = SelectObject(body_chain_gdi_debug_hdc, pen);
-    } else {
-        SelectObject(body_chain_gdi_debug_hdc, pen);
-    }
-}
-
-static void body_chain_gdi_restore_pen(HPEN pen, HGDIOBJ old_pen)
-{
-    if (!body_chain_gdi_debug_hdc || !pen) return;
-    if (old_pen) SelectObject(body_chain_gdi_debug_hdc, old_pen);
-    DeleteObject(pen);
-}
+#include "physx_debug_composite.h"
+static physx_debug_surface body_chain_hook5_surface;
+static D3DMATRIX body_chain_hook5_projection;
 
 static int resolve_body_collider_gl_api(void)
 {
@@ -146,20 +110,7 @@ static void draw_d3d8_debug_line(IDirect3DDevice8 *device,
                                  DWORD color)
 {
     body_collider_debug_vertex_t v[2];
-    if (body_chain_gdi_debug_mode && body_chain_gdi_debug_hdc) {
-        HPEN pen;
-        HGDIOBJ old_pen;
-        body_chain_gdi_select_pen(body_chain_gdi_color(color), &pen, &old_pen);
-        if (pen) {
-            MoveToEx(body_chain_gdi_debug_hdc, (int)(x0 + 0.5f),
-                     (int)(y0 + 0.5f), NULL);
-            LineTo(body_chain_gdi_debug_hdc, (int)(x1 + 0.5f),
-                   (int)(y1 + 0.5f));
-            body_chain_gdi_debug_primitives++;
-            body_chain_gdi_restore_pen(pen, old_pen);
-        }
-        return;
-    }
+
     v[0].x = x0; v[0].y = y0; v[0].z = 0.0f; v[0].rhw = 1.0f; v[0].color = color;
     v[1].x = x1; v[1].y = y1; v[1].z = 0.0f; v[1].rhw = 1.0f; v[1].color = color;
     IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_LINELIST, 1, v, sizeof(v[0]));
@@ -171,25 +122,7 @@ static void draw_d3d8_debug_circle(IDirect3DDevice8 *device,
 {
     body_collider_debug_vertex_t v[25];
     int i;
-    if (body_chain_gdi_debug_mode && body_chain_gdi_debug_hdc) {
-        HPEN pen;
-        HGDIOBJ old_pen;
-        HGDIOBJ old_brush;
-        body_chain_gdi_select_pen(body_chain_gdi_color(color), &pen, &old_pen);
-        old_brush = SelectObject(body_chain_gdi_debug_hdc,
-                                 GetStockObject(NULL_BRUSH));
-        if (pen) {
-            Ellipse(body_chain_gdi_debug_hdc,
-                    (int)(cx - radius + 0.5f),
-                    (int)(cy - radius + 0.5f),
-                    (int)(cx + radius + 0.5f),
-                    (int)(cy + radius + 0.5f));
-            body_chain_gdi_debug_primitives++;
-            body_chain_gdi_restore_pen(pen, old_pen);
-        }
-        if (old_brush) SelectObject(body_chain_gdi_debug_hdc, old_brush);
-        return;
-    }
+
     for (i = 0; i <= 24; i++) {
         float a = (float)i / 24.0f * 6.28318530717958647692f;
         v[i].x = cx + (float)cos((double)a) * radius;
@@ -286,29 +219,7 @@ static void draw_d3d8_debug_ellipse(IDirect3DDevice8 *device,
     body_collider_debug_vertex_t v[33];
     int i;
     if (!device || !major || !minor) return;
-    if (body_chain_gdi_debug_mode && body_chain_gdi_debug_hdc) {
-        float extent_x = physx_absf(major[0]) + physx_absf(minor[0]);
-        float extent_y = physx_absf(major[1]) + physx_absf(minor[1]);
-        HPEN pen;
-        HGDIOBJ old_pen;
-        HGDIOBJ old_brush;
-        if (extent_x < 0.5f) extent_x = 0.5f;
-        if (extent_y < 0.5f) extent_y = 0.5f;
-        body_chain_gdi_select_pen(body_chain_gdi_color(color), &pen, &old_pen);
-        old_brush = SelectObject(body_chain_gdi_debug_hdc,
-                                 GetStockObject(NULL_BRUSH));
-        if (pen) {
-            Ellipse(body_chain_gdi_debug_hdc,
-                    (int)(cx - extent_x + 0.5f),
-                    (int)(cy - extent_y + 0.5f),
-                    (int)(cx + extent_x + 0.5f),
-                    (int)(cy + extent_y + 0.5f));
-            body_chain_gdi_debug_primitives++;
-            body_chain_gdi_restore_pen(pen, old_pen);
-        }
-        if (old_brush) SelectObject(body_chain_gdi_debug_hdc, old_brush);
-        return;
-    }
+
     for (i = 0; i <= 32; i++) {
         float t = (float)i / 32.0f * 6.28318530717958647692f;
         float co = (float)cos((double)t);
@@ -653,7 +564,7 @@ static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
     if (!device || (!draw_body && !draw_addon && !draw_room)) {
         return;
     }
-    if (!body_chain_gdi_debug_mode) {
+    {
         IDirect3DDevice8_GetRenderState(device, D3DRS_ZENABLE, &old_z);
         IDirect3DDevice8_GetRenderState(device, D3DRS_ZWRITEENABLE, &old_zwrite);
         IDirect3DDevice8_GetRenderState(device, D3DRS_LIGHTING, &old_lighting);
@@ -750,7 +661,7 @@ static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
             continue;
         }
         if (state->basis_valid &&
-            body_chain_collider_cfg.penis_collision_enabled) {
+            body_chain_collider_cfg.penis_collision_enabled && !physx_genitals_paused(person_index)) {
             float chain_local[4][3];
             DWORD draw_now = GetTickCount();
             const char *chain_source = "none";
@@ -989,7 +900,7 @@ static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
                                        radius_px[i], color);
             }
         }
-        if (chain_ready && body_chain_collider_cfg.penis_collision_enabled) {
+        if (chain_ready && body_chain_collider_cfg.penis_collision_enabled && !physx_genitals_paused(person_index)) {
             for (i = 0; i < 3; i++) {
                 float r0 = chain_radius_px[i];
                 float r1 = chain_radius_px[i + 1];
@@ -1000,7 +911,7 @@ static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
                                         radius, 0xffffa000);
             }
         }
-        if (body_chain_collider_cfg.testicle_collision_enabled) {
+        if (body_chain_collider_cfg.testicle_collision_enabled && !physx_genitals_paused(person_index)) {
             for (i = BODY_COLLIDER_TESTICLES_01;
                  i <= BODY_COLLIDER_TESTICLES_02;
                  i++) {
@@ -1039,7 +950,7 @@ static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
         draw_addon_sidecar_colliders_d3d8(device);
     }
 
-    if (!body_chain_gdi_debug_mode) {
+    {
         IDirect3DDevice8_SetVertexShader(device, old_vertex_shader);
         IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, old_z);
         IDirect3DDevice8_SetRenderState(device, D3DRS_ZWRITEENABLE, old_zwrite);
@@ -1061,220 +972,8 @@ static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
     }
 }
 
-static void draw_body_chain_colliders_gdi_d3d8(IDirect3DDevice8 *device,
-                                               HWND hwnd)
-{
-    HDC hdc;
-    int saved;
-    static int gdi_draw_logged;
-    static int gdi_draw_failed_logged;
-    if (!device || !hwnd ||
-        !((body_chain_collider_cfg.enabled &&
-           body_chain_collider_cfg.debug_draw) ||
-          addon_sidecar_collision_debug_any() ||
-          room_collision_debug_any())) {
-        return;
-    }
-    hdc = GetDC(hwnd);
-    if (!hdc) {
-        if (!gdi_draw_failed_logged) {
-            gdi_draw_failed_logged = 1;
-            log_line("body-chain-colliders draw gdi-hook5 failed hwnd=%p reason=\"GetDC failed\"",
-                     hwnd);
-        }
-        return;
-    }
-    saved = SaveDC(hdc);
-    SetBkMode(hdc, TRANSPARENT);
-    body_chain_gdi_debug_hdc = hdc;
-    body_chain_gdi_debug_mode = 1;
-    body_chain_gdi_debug_primitives = 0;
-    draw_body_chain_colliders_d3d8(device);
-    body_chain_gdi_debug_mode = 0;
-    body_chain_gdi_debug_hdc = NULL;
-    if (!gdi_draw_logged && body_chain_gdi_debug_primitives > 0) {
-        gdi_draw_logged = 1;
-        log_line("body-chain-colliders draw gdi-hook5 active hwnd=%p primitives=%d note=\"window-DC overlay drawn after Hook5 Present; no extra D3D scene is opened\"",
-                 hwnd, body_chain_gdi_debug_primitives);
-    }
-    if (saved) RestoreDC(hdc, saved);
-    ReleaseDC(hwnd, hdc);
-}
-
-static int body_chain_hook5_overlay_prepare(HWND owner, int width, int height)
-{
-    HDC screen_dc;
-    if (!owner || width <= 0 || height <= 0) return 0;
-    if (!body_chain_hook5_overlay_hwnd) {
-        body_chain_hook5_overlay_hwnd = CreateWindowExA(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            "STATIC", "NC-TK17-PhysX-ColliderOverlay",
-            WS_POPUP, 0, 0, width, height,
-            NULL, NULL, self_module, NULL);
-        if (!body_chain_hook5_overlay_hwnd) return 0;
-    }
-    if (body_chain_hook5_overlay_dc &&
-        body_chain_hook5_overlay_bitmap &&
-        body_chain_hook5_overlay_w == width &&
-        body_chain_hook5_overlay_h == height) {
-        return 1;
-    }
-    if (body_chain_hook5_overlay_dc) {
-        if (body_chain_hook5_overlay_old_bitmap) {
-            SelectObject(body_chain_hook5_overlay_dc,
-                         body_chain_hook5_overlay_old_bitmap);
-        }
-        if (body_chain_hook5_overlay_bitmap) {
-            DeleteObject(body_chain_hook5_overlay_bitmap);
-        }
-        DeleteDC(body_chain_hook5_overlay_dc);
-        body_chain_hook5_overlay_dc = NULL;
-        body_chain_hook5_overlay_bitmap = NULL;
-        body_chain_hook5_overlay_old_bitmap = NULL;
-    }
-    screen_dc = GetDC(NULL);
-    if (!screen_dc) return 0;
-    body_chain_hook5_overlay_dc = CreateCompatibleDC(screen_dc);
-    body_chain_hook5_overlay_bitmap =
-        CreateCompatibleBitmap(screen_dc, width, height);
-    ReleaseDC(NULL, screen_dc);
-    if (!body_chain_hook5_overlay_dc ||
-        !body_chain_hook5_overlay_bitmap) {
-        if (body_chain_hook5_overlay_dc) {
-            DeleteDC(body_chain_hook5_overlay_dc);
-            body_chain_hook5_overlay_dc = NULL;
-        }
-        if (body_chain_hook5_overlay_bitmap) {
-            DeleteObject(body_chain_hook5_overlay_bitmap);
-            body_chain_hook5_overlay_bitmap = NULL;
-        }
-        return 0;
-    }
-    body_chain_hook5_overlay_old_bitmap =
-        SelectObject(body_chain_hook5_overlay_dc,
-                     body_chain_hook5_overlay_bitmap);
-    body_chain_hook5_overlay_w = width;
-    body_chain_hook5_overlay_h = height;
-    return 1;
-}
-
-static void draw_body_chain_colliders_layered_hook5_d3d8(
-    IDirect3DDevice8 *device,
-    HWND owner)
-{
-    RECT client;
-    POINT screen_pos = { 0, 0 };
-    SIZE size;
-    POINT src = { 0, 0 };
-    HDC screen_dc;
-    RECT fill_rect;
-    HBRUSH black_brush;
-    int saved;
-    static int layered_logged;
-    static int layered_failed_logged;
-
-    if (!device || !owner ||
-        !((body_chain_collider_cfg.enabled &&
-           body_chain_collider_cfg.debug_draw) ||
-          addon_sidecar_collision_debug_any() ||
-          room_collision_debug_any())) {
-        if (body_chain_hook5_overlay_hwnd) {
-            ShowWindow(body_chain_hook5_overlay_hwnd, SW_HIDE);
-        }
-        return;
-    }
-    if (!GetClientRect(owner, &client)) return;
-    size.cx = client.right - client.left;
-    size.cy = client.bottom - client.top;
-    if (size.cx <= 0 || size.cy <= 0) return;
-    ClientToScreen(owner, &screen_pos);
-    if (!body_chain_hook5_overlay_prepare(owner, size.cx, size.cy)) {
-        if (!layered_failed_logged) {
-            layered_failed_logged = 1;
-            log_line("body-chain-colliders draw layered-hook5 failed hwnd=%p size=%dx%d reason=\"overlay window or memory bitmap could not be created\"",
-                     owner, size.cx, size.cy);
-        }
-        return;
-    }
-
-    fill_rect.left = 0;
-    fill_rect.top = 0;
-    fill_rect.right = size.cx;
-    fill_rect.bottom = size.cy;
-    black_brush = CreateSolidBrush(RGB(0, 0, 0));
-    if (black_brush) {
-        FillRect(body_chain_hook5_overlay_dc, &fill_rect, black_brush);
-        DeleteObject(black_brush);
-    }
-    saved = SaveDC(body_chain_hook5_overlay_dc);
-    SetBkMode(body_chain_hook5_overlay_dc, TRANSPARENT);
-    body_chain_gdi_debug_hdc = body_chain_hook5_overlay_dc;
-    body_chain_gdi_debug_mode = 1;
-    body_chain_gdi_debug_primitives = 0;
-    draw_body_chain_colliders_d3d8(device);
-    body_chain_gdi_debug_mode = 0;
-    body_chain_gdi_debug_hdc = NULL;
-    if (saved) RestoreDC(body_chain_hook5_overlay_dc, saved);
-
-    if (body_chain_gdi_debug_primitives <= 0) {
-        ShowWindow(body_chain_hook5_overlay_hwnd, SW_HIDE);
-        return;
-    }
-
-    screen_dc = GetDC(NULL);
-    if (screen_dc) {
-        UpdateLayeredWindow(body_chain_hook5_overlay_hwnd,
-                            screen_dc,
-                            &screen_pos,
-                            &size,
-                            body_chain_hook5_overlay_dc,
-                            &src,
-                            RGB(0, 0, 0),
-                            NULL,
-                            ULW_COLORKEY);
-        ReleaseDC(NULL, screen_dc);
-        SetWindowPos(body_chain_hook5_overlay_hwnd,
-                     HWND_TOPMOST,
-                     screen_pos.x,
-                     screen_pos.y,
-                     size.cx,
-                     size.cy,
-                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        if (!layered_logged) {
-            layered_logged = 1;
-            log_line("body-chain-colliders draw layered-hook5 active hwnd=%p overlay=%p size=%dx%d primitives=%d note=\"transparent click-through overlay tracks TK17 client area; avoids window-DC flicker after Hook5 Present\"",
-                     owner,
-                     body_chain_hook5_overlay_hwnd,
-                     size.cx,
-                     size.cy,
-                     body_chain_gdi_debug_primitives);
-        }
-    }
-}
-
-static void destroy_body_chain_hook5_overlay(void)
-{
-    if (body_chain_hook5_overlay_dc) {
-        if (body_chain_hook5_overlay_old_bitmap) {
-            SelectObject(body_chain_hook5_overlay_dc,
-                         body_chain_hook5_overlay_old_bitmap);
-        }
-        DeleteDC(body_chain_hook5_overlay_dc);
-    }
-    if (body_chain_hook5_overlay_bitmap) {
-        DeleteObject(body_chain_hook5_overlay_bitmap);
-    }
-    if (body_chain_hook5_overlay_hwnd) {
-        DestroyWindow(body_chain_hook5_overlay_hwnd);
-    }
-    body_chain_hook5_overlay_hwnd = NULL;
-    body_chain_hook5_overlay_dc = NULL;
-    body_chain_hook5_overlay_bitmap = NULL;
-    body_chain_hook5_overlay_old_bitmap = NULL;
-    body_chain_hook5_overlay_w = 0;
-    body_chain_hook5_overlay_h = 0;
-}
+#include "physx_hook5_wire_shapes.c"
+#include "physx_hook5_collision_bridge.c"
 
 static int project_opengl_view_point(const GLfloat projection[16],
                                      const GLint viewport[4],
@@ -1708,7 +1407,7 @@ static void draw_body_chain_colliders_opengl(void)
             continue;
         }
         if (state->basis_valid &&
-            body_chain_collider_cfg.penis_collision_enabled) {
+            body_chain_collider_cfg.penis_collision_enabled && !physx_genitals_paused(person_index)) {
             float chain_local[4][3];
             DWORD draw_now = GetTickCount();
             const char *chain_source = "none";
@@ -1941,7 +1640,7 @@ static void draw_body_chain_colliders_opengl(void)
                                          radius_px[i], r, g, b);
             }
         }
-        if (chain_ready && body_chain_collider_cfg.penis_collision_enabled) {
+        if (chain_ready && body_chain_collider_cfg.penis_collision_enabled && !physx_genitals_paused(person_index)) {
             for (i = 0; i < 3; i++) {
                 float r0 = chain_radius_px[i];
                 float r1 = chain_radius_px[i + 1];
@@ -1953,7 +1652,7 @@ static void draw_body_chain_colliders_opengl(void)
                                           radius, 255, 160, 0);
             }
         }
-        if (body_chain_collider_cfg.testicle_collision_enabled) {
+        if (body_chain_collider_cfg.testicle_collision_enabled && !physx_genitals_paused(person_index)) {
             for (i = BODY_COLLIDER_TESTICLES_01;
                  i <= BODY_COLLIDER_TESTICLES_02;
                  i++) {

@@ -332,6 +332,8 @@ static int THISCALL hook_TBaseTransform_ConstraintArrayCount(
 static void __stdcall hook_PoseEdit_InitTracks(void);
 static float physx_clampf(float v, float lo, float hi);
 static int ptr_executable(const void *p);
+static int physx_pause_hidden_genitals;
+static int physx_genitals_paused(int person_index);
 static void trim_in_place(char *s);
 static const char *body_chain_collider_node_label(int node_index);
 
@@ -822,6 +824,7 @@ typedef struct body_chain_physics_config_t {
     int wind_tail_axis[3];
     float wind_axis_scale[3];
     int collision_scope;
+    float collision_strength;
     int root_offset;
     int output_offset;
     int animation_output_offset;
@@ -890,6 +893,11 @@ typedef struct body_chain_physics_config_t {
     float bone_translation_stiffness;
     float bone_translation_damping;
     float bone_translation_max_offset[3];
+    /* Optional collision-only bounds in the output parent's local space.
+       Bits 1/2 mark a configured minimum/maximum; zero preserves legacy. */
+    unsigned int collision_offset_bounds;
+    float collision_min_offset[3];
+    float collision_max_offset[3];
     float gravity_inward_strength;
     float gravity_outward_strength;
     int enabled_person[4];
@@ -1128,6 +1136,11 @@ typedef struct body_chain_person_state_t {
     DWORD live_ownership_simulation_serial;
     LONG live_ownership_node_generation;
     DWORD ownership_candidate_tick;
+    int clothing_resume_pending;
+    int clothing_resume_pose_valid;
+    float clothing_resume_base_rest[3][3];
+    int clothing_resume_skeleton_valid;
+    LONG clothing_resume_generation;
     unsigned int ownership_candidate_samples;
     void *ownership_candidate_root_raw;
     void *ownership_candidate_joint_raw[3];
@@ -1193,6 +1206,7 @@ typedef struct body_chain_person_state_t {
     float velocity[3][3];
     float collision_step_points[4][3];
     float collision_step_angle[3][3];
+    float collision_free_target[3][3];
     DWORD collision_step_tick;
     float collision_step_dt;
     DWORD collision_solve_log_tick;
@@ -1273,6 +1287,8 @@ typedef struct breasts_physics_person_state_t {
     float angular_velocity[2][3];
     float bone_translation[2][3];
     float bone_translation_velocity[2][3];
+    float collision_free_translation[2][3];
+    float collision_free_velocity[2][3];
     int contact_translation_active;
     float contact_previous_world[2][3];
     DWORD contact_previous_tick[2], contact_log_tick;
@@ -1347,6 +1363,7 @@ typedef struct body_chain_contact_t {
     float segment_t;
     float penetration;
     float target_sep;
+    float strength;
     float chain[3];
     float body[3];
     float normal[3];
@@ -1360,7 +1377,8 @@ static void body_chain_store_contact(body_chain_contact_t *contacts,
                                      float penetration,
                                      const float chain[3],
                                      const float body[3],
-                                     const float normal[3])
+                                     const float normal[3],
+                                     float strength)
 {
     int slot = -1;
     int i;
@@ -1389,7 +1407,7 @@ static void body_chain_store_contact(body_chain_contact_t *contacts,
             contacts[i].normal[0] * normal[0] +
             contacts[i].normal[1] * normal[1] +
             contacts[i].normal[2] * normal[2];
-        if (normal_dot >= normal_merge_dot &&
+        if (contacts[i].strength == strength && normal_dot >= normal_merge_dot &&
             fabsf(contacts[i].segment_t - segment_t) < 0.025f) {
             if (penetration <= contacts[i].penetration) return;
             slot = i;
@@ -1423,6 +1441,7 @@ static void body_chain_store_contact(body_chain_contact_t *contacts,
     contacts[slot].segment = segment;
     contacts[slot].segment_t = physx_clampf(segment_t, 0.0f, 1.0f);
     contacts[slot].penetration = penetration;
+    contacts[slot].strength = strength;
     contacts[slot].target_sep =
         (chain[0] - body[0]) * normal[0] +
         (chain[1] - body[1]) * normal[1] +
@@ -2108,6 +2127,7 @@ static body_chain_physics_config_t body_chain_physics_global_cfg = {
     .wind_tail_axis = { 2, 0, 1 },
     .wind_axis_scale = { -1.0f, -1.0f, 0.0f },
     .collision_scope = BODY_CHAIN_COLLISION_SCOPE_FULL_BODY_ALL,
+    .collision_strength = 1.0f,
     .root_offset = 0x0e8,
     .output_offset = 0x06c,
     .animation_output_offset = 0x06c,
@@ -2183,6 +2203,7 @@ static body_chain_physics_config_t testicle_physics_global_cfg = {
     .wind_tail_axis = { 2, 0, 1 },
     .wind_axis_scale = { -1.0f, -1.0f, 0.0f },
     .collision_scope = BODY_CHAIN_COLLISION_SCOPE_FULL_BODY_ALL,
+    .collision_strength = 1.0f,
     .root_offset = 0x0e8,
     .output_offset = 0x06c,
     .animation_output_offset = 0x06c,
@@ -2256,6 +2277,7 @@ static body_chain_physics_config_t breasts_physics_global_cfg = {
     .wind_tail_axis = { 2, 0, 1 },
     .wind_axis_scale = { -1.0f, 1.0f, 0.0f },
     .collision_scope = BODY_CHAIN_COLLISION_SCOPE_FULL_BODY_ALL,
+    .collision_strength = 1.0f,
     .root_offset = 0x0e8,
     .output_offset = 0x06c,
     .override_animation = 1,
@@ -2347,6 +2369,7 @@ static body_chain_physics_config_t butt_physics_global_cfg = {
     .wind_tail_axis = { 2, 0, 1 },
     .wind_axis_scale = { -1.0f, 1.0f, 0.0f },
     .collision_scope = BODY_CHAIN_COLLISION_SCOPE_FULL_BODY_ALL,
+    .collision_strength = 1.0f,
     .root_offset = 0x0e8,
     .output_offset = 0x06c,
     .override_animation = 1,
@@ -3308,6 +3331,11 @@ static int sidecar_count;
 static DWORD last_update_tick;
 static DWORD last_sim_tick;
 static DWORD physx_simulation_serial;
+/* Animation-phase reveal preparation shares the solver's configuration and
+   scratch data. Never enter it recursively from native ownership handoff. */
+static volatile LONG physx_physics_phase_busy;
+static unsigned int physx_genital_early_attempted[2];
+static int physx_genital_early_sample_done;
 static uint64_t body_update_frame_us;
 static int body_update_precise_frame;
 
@@ -3758,7 +3786,10 @@ static int normal_log_line_allowed(const char *fmt)
         normal_log_starts_with(fmt, "body-profile sidecar reload ") ||
         normal_log_starts_with(fmt, "settings write failed ") ||
         normal_log_starts_with(fmt, "settings ignored ") ||
+        normal_log_starts_with(fmt, "settings slider ") ||
+        normal_log_starts_with(fmt, "incoming collision-strength ") ||
         normal_log_starts_with(fmt, "gravity responsiveness ") ||
+        normal_log_starts_with(fmt, "genital physics state ") ||
         normal_log_starts_with(fmt, "single-bone contact ")) {
         return 1;
     }
@@ -4236,6 +4267,7 @@ typedef struct ptr_readable_cache_entry_t {
 static volatile LONG ptr_readable_cache_epoch = 1;
 static __thread ptr_readable_cache_entry_t
     ptr_readable_cache[PTR_READABLE_CACHE_SLOTS];
+static __thread unsigned int ptr_readable_cache_last_slot;
 
 static void ptr_readable_cache_advance_frame(void)
 {
@@ -4253,12 +4285,22 @@ static int ptr_readable(const void *p, size_t bytes)
     if (!p) return 0;
     if (end < cur) return 0;
     while (cur < end) {
+        /* Entries describe regions, not individual pages. Reuse the last
+           entry when scanning another page of that same region, before
+           consulting the page hash. It retains the same frame lifetime. */
+        ptr_readable_cache_entry_t *entry =
+            &ptr_readable_cache[ptr_readable_cache_last_slot];
+        if (entry->epoch == epoch && cur >= entry->base && cur < entry->end) {
+            cur = entry->end;
+            continue;
+        }
         uintptr_t page = (uintptr_t)cur >> 12;
         uintptr_t cache_hash = page ^ (page >> 8) ^ (page >> 16);
-        ptr_readable_cache_entry_t *entry =
-            &ptr_readable_cache[cache_hash & (PTR_READABLE_CACHE_SLOTS - 1)];
+        unsigned int slot = cache_hash & (PTR_READABLE_CACHE_SLOTS - 1);
+        entry = &ptr_readable_cache[slot];
 
         if (entry->epoch == epoch && cur >= entry->base && cur < entry->end) {
+            ptr_readable_cache_last_slot = slot;
             cur = entry->end;
             continue;
         }
@@ -4267,6 +4309,7 @@ static int ptr_readable(const void *p, size_t bytes)
         entry->base = (BYTE*)mbi.BaseAddress;
         entry->end = entry->base + mbi.RegionSize;
         entry->epoch = epoch;
+        ptr_readable_cache_last_slot = slot;
         cur = entry->end;
     }
     return 1;
@@ -5007,18 +5050,23 @@ static void *resolve_component_array_target(void *root,
 static int addon_declared_name_matches_alias(const char *runtime_name,
                                              const char *declared_name)
 {
-    char alias[192];
     if (!runtime_name || !declared_name ||
         !runtime_name[0] || !declared_name[0]) {
         return 0;
     }
     if (_stricmp(runtime_name, declared_name) == 0) return 1;
-    _snprintf(alias, sizeof(alias), "S%s", declared_name);
-    if (_stricmp(runtime_name, alias) == 0) return 1;
-    _snprintf(alias, sizeof(alias), "local_%s", declared_name);
-    if (_stricmp(runtime_name, alias) == 0) return 1;
-    _snprintf(alias, sizeof(alias), "local_S%s", declared_name);
-    return _stricmp(runtime_name, alias) == 0;
+    /* Object::iNameSet also receives UI names during Key Editor scrolling.
+       Avoid formatting three aliases for every unrelated name/target pair.
+       Strip only a recognized runtime prefix, preserving declared names that
+       themselves start with S or local_ and the original case-insensitive
+       matching. No cached result can become stale after a sidecar reload. */
+    if ((runtime_name[0] == 'S' || runtime_name[0] == 's') &&
+        _stricmp(runtime_name + 1, declared_name) == 0) return 1;
+    if (_strnicmp(runtime_name, "local_", 6) != 0) return 0;
+    runtime_name += 6;
+    if (_stricmp(runtime_name, declared_name) == 0) return 1;
+    return (runtime_name[0] == 'S' || runtime_name[0] == 's') &&
+           _stricmp(runtime_name + 1, declared_name) == 0;
 }
 
 static int addon_declared_sidecar_name(const char *name)
@@ -8806,6 +8854,11 @@ static unsigned int reset_body_chain_person_state(
     state->root_drive_untrusted_log_tick = 0;
     state->late_ownership_log_tick = 0;
     state->ownership_candidate_tick = 0;
+    state->clothing_resume_pending = 0;
+    state->clothing_resume_pose_valid = 0;
+    memset(state->clothing_resume_base_rest, 0, sizeof(state->clothing_resume_base_rest));
+    state->clothing_resume_skeleton_valid = 0;
+    state->clothing_resume_generation = 0;
     state->ownership_candidate_samples = 0;
     state->ownership_candidate_root_raw = NULL;
     for (i = 0; i < 3; i++) {
@@ -10561,12 +10614,17 @@ static void reset_butt_physics_all(int restore_output);
 #define PHYSX_FAULT_TRACE_ENABLED (defaults_cfg.debug)
 #include "physx_fault_trace.h"
 #include "physx_sidecar.c"
+#include "physx_genital_visibility.c"
 
 static void physx_tick(void)
 {
     DWORD now = GetTickCount();
     LONGLONG total_start;
     LONGLONG phase_start;
+    if (InterlockedCompareExchange(&physx_physics_phase_busy, 1, 0)) return;
+    /* Also blocks a late animation callback from advancing these chains again
+       after the ordinary frame-end simulation has already run. */
+    physx_genital_early_sample_done = 1;
     physx_perf_prepare(now);
     physx_simulation_serial++;
     if (!physx_simulation_serial) physx_simulation_serial = 1;
@@ -10603,6 +10661,7 @@ static void physx_tick(void)
     phase_start = physx_perf_counter();
     update_targets(now);
     body_profile_probe_runtime_bindings(now);
+    physx_update_genital_pause_state(now);
     body_update_prepare_frame(now);
     physx_perf_add(PHYSX_PERF_BINDINGS, phase_start);
 
@@ -10659,6 +10718,7 @@ static void physx_tick(void)
     body_profile_set_active_person_config(-1);
     physx_perf_add(PHYSX_PERF_TOTAL, total_start);
     physx_perf_report(now);
+    InterlockedExchange(&physx_physics_phase_busy, 0);
 }
 
 #include "physx_hooks_core.c"
@@ -10741,7 +10801,7 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
         restore_tk17_breasts_inertia_all(GetTickCount());
         reset_butt_physics_all(1);
         reset_body_chain_physics();
-        destroy_body_chain_hook5_overlay();
+        physx_hook5_collision_shutdown();
         log_line("NC-TK17-PhysX.dll detached");
         log_ready = 0;
         DeleteCriticalSection(&log_lock);

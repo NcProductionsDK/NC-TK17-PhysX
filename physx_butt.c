@@ -472,6 +472,8 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
                 state->angular_velocity[side][axis] = 0.0f;
                 state->bone_translation[side][axis] = 0.0f;
                 state->bone_translation_velocity[side][axis] = 0.0f;
+                state->collision_free_translation[side][axis] = 0.0f;
+                state->collision_free_velocity[side][axis] = 0.0f;
             }
         }
         butt_physics_capture_animation_rows(state);
@@ -597,6 +599,8 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
     } else {
         memset(state->bone_translation,0,sizeof(state->bone_translation));
         memset(state->bone_translation_velocity,0,sizeof(state->bone_translation_velocity));
+        memset(state->collision_free_translation,0,sizeof(state->collision_free_translation));
+        memset(state->collision_free_velocity,0,sizeof(state->collision_free_velocity));
     }
     butt_physics_apply_output(state, 0, 0);
     body_update_record_publish(person_index, 3, now, cfg->update_rate_hz);

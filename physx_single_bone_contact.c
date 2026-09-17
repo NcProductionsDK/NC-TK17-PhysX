@@ -35,7 +35,7 @@ static void single_bone_center(const float sample[3],const float reference[3],
 
 static void single_bone_body_contacts(int person,int butt,int side,int scope,
     const float center[3],float radius,const float matrix[9],const float x[3],
-    single_bone_contacts_t *contacts)
+    const float free_target[3],float incoming_strength,single_bone_contacts_t *contacts)
 {
     int p,node,a;
     float strength=physx_clampf(body_chain_collider_cfg.response_strength,0,1);
@@ -73,7 +73,8 @@ static void single_bone_body_contacts(int person,int butt,int side,int scope,
             /* Subunit strengths allow gradual recovery; never over-separate
                just because an old profile used strength greater than one. */
             if(depth>0) depth*=strength;
-            single_bone_world_plane(contacts,matrix,normal,depth,x);
+            single_bone_world_plane_strength(contacts,matrix,normal,depth,x,free_target,
+                p==person?1.0f:incoming_strength);
         }
     }
 }
@@ -109,6 +110,8 @@ static int single_bone_contact_step(int person,int butt,
                       (side?BODY_COLLIDER_BREAST_R:BODY_COLLIDER_BREAST_L);
         float reference[3],matrix[9],sample[3],lo[3],hi[3];
         float *x=state->bone_translation[side],*v=state->bone_translation_velocity[side];
+        float *free_x=state->collision_free_translation[side];
+        float *free_v=state->collision_free_velocity[side];
         float radius=body_chain_collider_visual_radius_for_node(node);
         int a,step,iteration,valid,room=cfg->room_collision_enabled && room_collision_is_enabled();
         int body=body_chain_collider_cfg.enabled &&
@@ -120,10 +123,29 @@ static int single_bone_contact_step(int person,int butt,
         if(valid) {
             memcpy(observed[side],sample,sizeof(sample));valid_mask|=1<<side;
         }
-        for(a=0;a<3;a++) {lo[a]=-limit[a];hi[a]=limit[a];}
-        if(elapsed_ms>BODY_MOTION_MAX_ELAPSED_MS) memset(v,0,sizeof(float)*3);
+        if(elapsed_ms>BODY_MOTION_MAX_ELAPSED_MS) {
+            memset(v,0,sizeof(float)*3);
+            memset(free_v,0,sizeof(float)*3);
+        }
         for(step=0;step<steps;step++) {
             single_bone_contacts_t contacts={0};float predicted[3];
+            /* Track the same spring without contacts, including its existing
+               translation limits. This moving reference preserves jiggle and
+               sag and prevents offset allowances accumulating every frame.
+               Track it even with bounds omitted, for live config changes. */
+            for(a=0;a<3;a++) {
+                free_v[a]=(free_v[a]+(target[side][a]-free_x[a])*stiffness*dt)/(1+damping*dt);
+                free_x[a]+=free_v[a]*dt;
+                lo[a]=-limit[a];hi[a]=limit[a];
+            }
+            single_bone_project(&contacts,lo,hi,free_x);
+            single_bone_velocity(&contacts,free_x,limit,free_v);
+            for(a=0;a<3;a++) {
+                if(cfg->collision_offset_bounds&1u)
+                    lo[a]=fmaxf(lo[a],free_x[a]+cfg->collision_min_offset[a]);
+                if(cfg->collision_offset_bounds&2u)
+                    hi[a]=fminf(hi[a],free_x[a]+cfg->collision_max_offset[a]);
+            }
             for(a=0;a<3;a++) {
                 /* Implicit damping cannot flip velocity with a large damping
                    setting. Contact recovery itself contributes no impulse. */
@@ -153,7 +175,7 @@ static int single_bone_contact_step(int person,int butt,
                     single_bone_center(sample,reference,x,matrix,center);
                     if(room) single_bone_collect_room(center,radius,matrix,x,&contacts);
                     if(body) single_bone_body_contacts(person,butt,side,cfg->collision_scope,
-                        center,radius,matrix,x,&contacts);
+                        center,radius,matrix,x,target[side],cfg->collision_strength,&contacts);
                 }
                 memcpy(before,x,sizeof(before));
                 single_bone_project(&contacts,lo,hi,x);
@@ -161,6 +183,17 @@ static int single_bone_contact_step(int person,int butt,
                 if(single_bone_dot(moved,moved)<1e-14f) break;
             }
             single_bone_velocity(&contacts,x,limit,v);
+            /* The new bounds move with the collision-free spring. Stop only
+               velocity escaping relative to that reference; bounds take
+               priority over separation when a contact cannot be satisfied. */
+            for(a=0;a<3;a++) {
+                if((cfg->collision_offset_bounds&1u) &&
+                    x[a]<=free_x[a]+cfg->collision_min_offset[a]+1e-6f)
+                    v[a]=fmaxf(v[a],free_v[a]);
+                if((cfg->collision_offset_bounds&2u) &&
+                    x[a]>=free_x[a]+cfg->collision_max_offset[a]-1e-6f)
+                    v[a]=fminf(v[a],free_v[a]);
+            }
             for(a=0;a<3;a++) correction[side][a]+=x[a]-predicted[a];
             if(contacts.count) any=1;
             total_contacts+=contacts.count;
@@ -184,8 +217,8 @@ static int single_bone_contact_step(int person,int butt,
     if((defaults_cfg.debug || any) &&
         (!state->contact_log_tick || now-state->contact_log_tick>=1000u)) {
         state->contact_log_tick=now;
-        log_line("single-bone contact system=%s person=%d contacts=%d residual_local=%.6f valid_mask=%d elapsed_ms=%u translation=(%.5f,%.5f,%.5f;%.5f,%.5f,%.5f) correction=(%.5f,%.5f,%.5f;%.5f,%.5f,%.5f) observed_world=(%.5f,%.5f,%.5f;%.5f,%.5f,%.5f) solved_world=(%.5f,%.5f,%.5f;%.5f,%.5f,%.5f)",
-            butt?"butt":"breasts",person+1,total_contacts,largest_residual,valid_mask,elapsed_ms,
+        log_line("single-bone contact system=%s person=%d contacts=%d residual_local=%.6f valid_mask=%d elapsed_ms=%u incoming_strength=%.3f translation=(%.5f,%.5f,%.5f;%.5f,%.5f,%.5f) correction=(%.5f,%.5f,%.5f;%.5f,%.5f,%.5f) observed_world=(%.5f,%.5f,%.5f;%.5f,%.5f,%.5f) solved_world=(%.5f,%.5f,%.5f;%.5f,%.5f,%.5f)",
+            butt?"butt":"breasts",person+1,total_contacts,largest_residual,valid_mask,elapsed_ms,cfg->collision_strength,
             state->bone_translation[0][0],state->bone_translation[0][1],state->bone_translation[0][2],
             state->bone_translation[1][0],state->bone_translation[1][1],state->bone_translation[1][2],
             correction[0][0],correction[0][1],correction[0][2],correction[1][0],correction[1][1],correction[1][2],

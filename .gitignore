@@ -54,3 +54,6 @@ build/body_update_test.exe
 build/smooth-body-backup-*/
 build/paired_body_update_test.c
 build/paired_body_update_test.exe
+build/physx_debug_composite_test.exe
+build/physx_wire_shapes_test.exe
+build/genital_visibility_test.exe

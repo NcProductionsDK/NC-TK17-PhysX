@@ -36,7 +36,7 @@ typedef struct {int horizontal_output_axis,vertical_output_axis,rotation_tail_ax
 static body_chain_physics_config_t body_chain_physics_cfg;
 static struct {float response_strength,response_max_degrees_per_tick;int collision_iterations;float link_length[3];} body_chain_collider_cfg={1,20,2,{.5f,.5f,.5f}};
 typedef struct {
-    float angle[3][3],velocity[3][3],collision_step_points[4][3],collision_step_angle[3][3];
+    float angle[3][3],velocity[3][3],collision_step_points[4][3],collision_step_angle[3][3],collision_free_target[3][3];
     DWORD collision_step_tick;
     float collision_step_dt;
     int collision_step_valid;
@@ -113,7 +113,7 @@ static void configure(void){
     for(j=0;j<3;j++)for(a=0;a<3;a++){body_chain_physics_cfg.link_min_angle[j][a]=-90;body_chain_physics_cfg.link_max_angle[j][a]=90;}
 }
 static void support(body_chain_contact_t *c,int segment,float t,float depth,const float *normal,const float points[4][3]){
-    memset(c,0,sizeof(*c));c->segment=segment;c->segment_t=t;c->penetration=depth;
+    memset(c,0,sizeof(*c));c->segment=segment;c->segment_t=t;c->penetration=depth;c->strength=1.0f;
     memcpy(c->normal,normal,3*sizeof(float));body_contact_point(points,c,c->chain);
     c->target_sep=vec3_dot(c->chain,normal)+depth;
 }
@@ -122,10 +122,10 @@ static void supports(void){
     body_chain_person_state_t state={0};body_chain_contact_t c[8];int count=0;
     float up[3]={0,1,0},side[3]={0,0,1},a[3]={-.025f,0,0},b[3]={-.09f,0,0},body[3]={0};
     float correction[3][2],out[4][3];
-    body_chain_store_contact(c,&count,8,0,.25f,.004f,a,body,up);
-    body_chain_store_contact(c,&count,8,0,.9f,.003f,b,body,up);
+    body_chain_store_contact(c,&count,8,0,.25f,.004f,a,body,up,1.0f);
+    body_chain_store_contact(c,&count,8,0,.9f,.003f,b,body,up,1.0f);
     assert(count==2);
-    body_chain_store_contact(c,&count,8,0,.9f,.002f,b,body,up);assert(count==2);
+    body_chain_store_contact(c,&count,8,0,.9f,.002f,b,body,up,1.0f);assert(count==2);
     support(&c[0],0,1,.001f,up,base);support(&c[1],1,1,.005f,up,base);
     support(&c[2],1,.6f,.002f,side,base);
     body_contact_solve(&body_chain_physics_cfg,&state,base,c,3,3,correction);
@@ -413,7 +413,7 @@ static void thigh_recovery(void){
             depth=.1025f-dist-.001f;deepest=fmaxf(deepest,depth);
             if(depth<=1e-6f || dist<1e-6f)continue;
             for(a=0;a<3;a++)normal[a]=(p[a]-q[a])/dist;
-            body_chain_store_contact(c,&count,6,i,ct,fminf(depth,.05f),p,q,normal);
+            body_chain_store_contact(c,&count,6,i,ct,fminf(depth,.05f),p,q,normal,1.0f);
         }
         if(!count)break;
         body_contact_solve(&body_chain_physics_cfg,&s,points,c,count,3,corr);
@@ -497,7 +497,63 @@ static void warmup_geometry(void){
     assert(frame_updates>0);
     puts("PASS: production capture/begin initializes both chain models before collision promotion from current engine pivots only; ready toggle preserves model, unsafe/held/synthetic samples rejected");
 }
-int main(void){setbuf(stdout,NULL);configure();supports();candidate();testicle_geometry();asynchronous_cross_sample();velocity();blocked_velocity();limits();composed_contact();contact_near_limit();inertia_contact_energy();observed_pose_error();embedded_history();competing_supports();thigh_recovery();deep_overlap();settling();warmup_geometry();return 0;}
+static void incoming_strength_checks(void){
+ const float strengths[]={.1f,.25f,1.0f};float up[3]={0,1,0},body[3]={0};
+ for(int segments=2;segments<=3;segments++)for(int passes=1;passes<=6;passes+=5)for(int k=0;k<3;k++){
+  body_chain_person_state_t s={0};body_chain_contact_t c[4];int count=0;
+  float correction[3][2],out[4][3];configure();body_chain_collider_cfg.collision_iterations=passes;
+  body_chain_store_contact(c,&count,4,0,1,.002f,base[1],body,up,strengths[k]);
+  body_contact_solve(&body_chain_physics_cfg,&s,base,c,count,segments,correction);
+  body_contact_predict(&body_chain_physics_cfg,&s,base,correction,out);
+  assert(fabsf(out[1][1]-.002f*strengths[k])<2e-6f);
+  /* Zero-depth contact isolates velocity response from changing Jacobians. */
+  support(c,0,1,0,up,base);c[0].strength=strengths[k];s.velocity[0][1]=-10;
+  body_contact_solve(&body_chain_physics_cfg,&s,base,c,1,segments,correction);
+  assert(fabsf(s.velocity[0][1]+10*(1-strengths[k]))<2e-5f);
+  /* Hard self/room support with the same normal must survive soft merging. */
+  count=0;memset(&s,0,sizeof(s));
+  body_chain_store_contact(c,&count,4,0,1,.002f,base[1],body,up,strengths[k]);
+  body_chain_store_contact(c,&count,4,0,1,.002f,base[1],body,up,1);
+  assert(count==(strengths[k]<1?2:1));
+  body_contact_solve(&body_chain_physics_cfg,&s,base,c,count,segments,correction);
+  body_contact_predict(&body_chain_physics_cfg,&s,base,correction,out);
+  assert(fabsf(out[1][1]-.002f)<2e-6f);
+  support(c,0,1,0,up,base);support(c+1,0,1,0,up,base);c[0].strength=strengths[k];
+  s.velocity[0][1]=-10;body_contact_solve(&body_chain_physics_cfg,&s,base,c,2,segments,correction);
+  assert(fabsf(s.velocity[0][1])<2e-5f);
+ }
+ body_chain_collider_cfg.collision_iterations=2;
+ puts("PASS: two/three-link incoming strengths preserve fractional recovery across solver iteration counts, soften inward speed, and retain mixed self/room hard supports");
+}
+static void sustained_strength_checks(void){
+ const float base[4][3]={{0,0,0},{-.1f,0,0},{-.2f,0,0},{-.3f,0,0}};
+ const float rates[]={20,30,60,144},strengths[]={1,.1f,.25f,.1f,1};
+ for(int segments=2;segments<=3;segments++)for(int r=0;r<4;r++)for(int hard=0;hard<2;hard++){
+  body_chain_person_state_t s={0};float up[3]={0,1,0},points[4][3],corr[3][2],free_points[4][3];
+  configure();assert(body_pose_fit(base,s.angle,segments,&s.collision_pose));
+  s.collision_step_valid=s.collision_pose_valid=1;
+  float dt=(1/rates[r])/body_motion_substeps(1/rates[r]);s.collision_step_dt=dt;
+  for(int phase=0;phase<5;phase++){
+   s.collision_free_target[0][1]=phase==3?.5f:0;
+   body_pose_evaluate(&s.collision_pose,s.collision_free_target,free_points);
+   float applied=hard?1:strengths[phase];
+   float expected=free_points[1][1]+applied*(.004f-free_points[1][1]);
+   for(int frame=0;frame<800;frame++){
+    for(int j=0;j<segments;j++)for(int a=0;a<3;a++)
+     body_motion_spring_step(&s.angle[j][a],&s.velocity[j][a],s.collision_free_target[j][a],200,6,dt);
+    body_contact_predict(&body_chain_physics_cfg,&s,base,NULL,points);
+    body_chain_contact_t c[2];support(c,0,1,.004f-points[1][1],up,points);c[0].strength=strengths[phase];
+    if(hard)support(c+1,0,1,.004f-points[1][1],up,points);
+    body_contact_solve(&body_chain_physics_cfg,&s,points,c,hard?2:1,segments,corr);
+    body_contact_apply(&s,&body_chain_physics_cfg,corr,segments,0);
+    body_contact_predict(&body_chain_physics_cfg,&s,base,NULL,points);
+    if(frame>600)assert(fabsf(points[1][1]-expected)<.00002f);
+   }
+  }
+ }
+ puts("PASS: sustained two/three-link contacts remain weak across thousands of steps, live strength changes, nonzero free targets and frame rates; mixed hard supports stay full");
+}
+int main(void){setbuf(stdout,NULL);configure();supports();candidate();testicle_geometry();asynchronous_cross_sample();velocity();blocked_velocity();limits();composed_contact();contact_near_limit();inertia_contact_energy();observed_pose_error();embedded_history();competing_supports();thigh_recovery();deep_overlap();settling();warmup_geometry();incoming_strength_checks();sustained_strength_checks();return 0;}
 '''
 build=root/'build';build.mkdir(exist_ok=True)
 path=build/'body_contact_test.c';path.write_text(fixture)

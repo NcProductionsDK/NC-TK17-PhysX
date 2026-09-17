@@ -44,55 +44,19 @@ static void physx_late_ownership_once_for_render_frame(void)
     }
 }
 
-static void draw_body_chain_colliders_d3d8_hook5_overlay(IDirect3DDevice8 *self)
-{
-    static int overlay_active;
-    static int overlay_logged;
-    static int overlay_failed_logged;
-    HRESULT hr;
-
-    if (!self || overlay_active) return;
-    if (!((body_chain_collider_cfg.enabled &&
-          body_chain_collider_cfg.debug_draw) ||
-          addon_sidecar_collision_debug_any() ||
-          room_collision_debug_any())) {
-        return;
-    }
-    if (!real_d3d8_BeginScene || !real_d3d8_EndScene) return;
-
-    overlay_active = 1;
-    hr = real_d3d8_BeginScene(self);
-    if (SUCCEEDED(hr)) {
-        draw_body_chain_colliders_d3d8(self);
-        real_d3d8_EndScene(self);
-        if (!overlay_logged) {
-            overlay_logged = 1;
-            log_line("body-chain-colliders draw d3d8 hook5-overlay active device=%p note=\"opened a tiny post-Hook5 overlay scene so collider visuals are presented after Hook5 EndScene compositing\"",
-                     self);
-        }
-    } else if (!overlay_failed_logged) {
-        overlay_failed_logged = 1;
-        log_line("body-chain-colliders draw d3d8 hook5-overlay skipped device=%p hr=0x%08lx note=\"BeginScene failed after Hook5 EndScene; falling back to normal EndScene timing\"",
-                 self, (DWORD)hr);
-    }
-    overlay_active = 0;
-}
-
 static HRESULT WINAPI hook_d3d8_Present(IDirect3DDevice8 *self, const RECT *src_rect, const RECT *dst_rect,
                                         HWND dst_window_override, const RGNDATA *dirty_region)
 {
     HRESULT hr;
     int hook5_active = physx_d3d8_hook5_active();
-    HWND overlay_hwnd = dst_window_override ? dst_window_override :
-        physx_d3d8_render_hwnd;
+    if (hook5_active) physx_hook5_collision_register();
     physx_tick_once_for_render_frame();
     physx_late_ownership_once_for_render_frame();
     hr = real_d3d8_Present ? real_d3d8_Present(self, src_rect, dst_rect, dst_window_override, dirty_region) : D3DERR_INVALIDCALL;
-    if (hook5_active && SUCCEEDED(hr)) {
-        draw_body_chain_colliders_layered_hook5_d3d8(self, overlay_hwnd);
-    }
     InterlockedExchange(&physx_render_frame_tick_done, 0);
     InterlockedExchange(&physx_render_frame_late_ownership_done, 0);
+    physx_genital_early_sample_done = 0;
+    physx_genital_early_attempted[0] = physx_genital_early_attempted[1] = 0;
     ptr_readable_cache_advance_frame();
     return hr;
 }
@@ -113,15 +77,9 @@ static HRESULT WINAPI hook_d3d8_EndScene(IDirect3DDevice8 *self)
     int hook5_active = physx_d3d8_hook5_active();
     physx_tick_once_for_render_frame();
     physx_late_ownership_once_for_render_frame();
-    draw_body_chain_colliders_d3d8(self);
+    if (hook5_active) physx_hook5_collision_register();
+    else draw_body_chain_colliders_d3d8(self);
     hr = real_d3d8_EndScene ? real_d3d8_EndScene(self) : D3DERR_INVALIDCALL;
-    if (hook5_active) {
-        static int hook5_overlay_disabled_logged;
-        if (!hook5_overlay_disabled_logged) {
-            hook5_overlay_disabled_logged = 1;
-            log_line("body-chain-colliders draw d3d8 hook5-overlay disabled note=\"post-EndScene overlay can black-screen Hook5; using normal in-scene timing while keeping Hook5 detection and direct D3D8 hook\""); 
-        }
-    }
     return hr;
 }
 
@@ -134,6 +92,8 @@ static BOOL WINAPI hook_SwapBuffers(HDC hdc)
     ok = real_SwapBuffers ? real_SwapBuffers(hdc) : FALSE;
     InterlockedExchange(&physx_render_frame_tick_done, 0);
     InterlockedExchange(&physx_render_frame_late_ownership_done, 0);
+    physx_genital_early_sample_done = 0;
+    physx_genital_early_attempted[0] = physx_genital_early_attempted[1] = 0;
     ptr_readable_cache_advance_frame();
     return ok;
 }
@@ -321,6 +281,7 @@ static void capture_d3d8_device_slot(void *obj, int index, void **real)
 
 static void patch_d3d8_device(IDirect3DDevice8 *dev)
 {
+    if (physx_d3d8_hook5_active()) physx_hook5_collision_register();
     patch_vtable_slot(dev, 15, hook_d3d8_Present, (void**)&real_d3d8_Present);
     capture_d3d8_device_slot(dev, 34, (void**)&real_d3d8_BeginScene);
     patch_vtable_slot(dev, 35, hook_d3d8_EndScene, (void**)&real_d3d8_EndScene);

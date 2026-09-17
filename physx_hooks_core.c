@@ -514,8 +514,9 @@ static void patch_config_editor_param_change(void)
                             CONFIG_EDITOR_PARAM_CHANGE_STOLEN_LEN,
                             (void**)&real_ConfigEditor_ParamChange)) {
         config_editor_param_change_hook_installed = 1;
-        log_line("settings ConfigEditor hook installed target=%p trampoline=%p params=20 note=\"NCPhysX-prefixed global controls write Extensions\\PhysX\\Config.ini; per-person toggles are handled directly by the context menu\"",
-                 target, (void*)real_ConfigEditor_ParamChange);
+        log_line("settings ConfigEditor hook installed target=%p trampoline=%p params=%u note=\"NCPhysX-prefixed global controls write Extensions\\PhysX\\Config.ini; per-person toggles are handled directly by the context menu\"",
+                 target, (void*)real_ConfigEditor_ParamChange,
+                 (unsigned int)(sizeof(physx_settings_bindings) / sizeof(physx_settings_bindings[0])));
     }
 }
 
@@ -531,19 +532,35 @@ static void THISCALL hook_ConfigEditor_ParamChange(void *self,
     const char *value_cstr = stringref_cstr_a(string_value);
     int is_physx = param_cstr &&
                    _strnicmp(param_cstr, "NCPhysX", 7) == 0;
+    const physx_settings_binding_t *slider_binding = NULL;
+    float slider_value = 0;
+    int slider_captured = 0;
+    int was_syncing = physx_settings_sync_depth != 0;
     param_copy[0] = 0;
     value_copy[0] = 0;
     if (is_physx) {
         lstrcpynA(param_copy, param_cstr, sizeof(param_copy));
         if (value_cstr) lstrcpynA(value_copy, value_cstr, sizeof(value_copy));
+        slider_binding = physx_settings_binding_by_name(param_copy);
+        if (!was_syncing && slider_binding &&
+            strcmp(slider_binding->key, "collision_strength") == 0) {
+            /* TK17's handler can rebuild controls. Capture the user's live
+               value before it can be replaced with the old INI/UI value. */
+            slider_captured = physx_slider_widget_value(
+                slider_binding->slider_widget, &slider_value);
+        }
     }
     if (real_ConfigEditor_ParamChange) {
         real_ConfigEditor_ParamChange(self, param_name, string_value,
                                       value_arg, event_arg);
     }
-    if (is_physx && !physx_settings_sync_depth) {
-        handle_physx_settings_change(param_copy,
-                                     value_copy[0] ? value_copy : NULL);
+    if (is_physx && !was_syncing && !physx_settings_sync_depth) {
+        if (slider_captured) {
+            physx_write_slider_value(slider_binding, slider_value);
+        } else {
+            handle_physx_settings_change(param_copy,
+                                         value_copy[0] ? value_copy : NULL);
+        }
     }
 }
 
@@ -1375,6 +1392,8 @@ static DWORD THISCALL hook_AppBase_ProcessAnimation(void *self)
        BlendControl values inside ProcessAnimation.  Consumer overlays must
        therefore exist before that evaluation; the post-call application is
        retained because ordinary runtime animation may write the controls. */
+    if (body_chain_runtime_mode_active())
+        physx_prepare_genital_reveal("AppBase-pre-animation");
     physx_public_run_post_animation_callbacks();
     if (physx_public_has_post_animation_callbacks() &&
         now - pre_trace_tick >= 1000u) {
@@ -1409,6 +1428,8 @@ static void THISCALL hook_PoseEdit_UpdateObjectsFromTracks(void *self)
     DWORD now = GetTickCount();
     if (tramp_PoseEdit_UpdateObjectsFromTracks)
         tramp_PoseEdit_UpdateObjectsFromTracks(self);
+    if (!body_chain_runtime_mode_active())
+        physx_prepare_genital_reveal("PoseEdit-post-tracks");
     physx_public_run_post_animation_callbacks();
     if (physx_public_has_post_animation_callbacks() &&
         now - trace_tick >= 1000u) {

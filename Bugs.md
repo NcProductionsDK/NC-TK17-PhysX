@@ -3,4 +3,5 @@
 - <s>PoseEditor GUI for testicle track isn't properly disabled when testicle PhysX is enabled.</s> Fixed
 - <s>CcConfigEditorPhysX's spinboxes are not synced to the config ini file the same way NC-TK17-Liquid's spinboxes are. (CcConfigEditorLiquids.lua)</s>
 - In PoseEditor, start with a pose with e.x. penis physics on, load a pose that has penis tracks i.e. meatspin, then start a new pose so its a blank pose, disable penis physx, penis tracks from meatspin inherits penis tracks which is incorrect.
-- The physx items in general can be slow to react to gravity and sometimes physx after switching a pose or something similar. This was originally made to prevent camera contaminating the physx but with astra this could be fixable properly.
+- <s>The physx items in general can be slow to react to gravity and sometimes physx after switching a pose or something similar. This was originally made to prevent camera contaminating the physx but with astra this could be fixable properly.</s>
+- Add-on sidecars are too camera depending. For example, gravity only seems to update when a camera action has finished (orbit, moving, looking around). This is to prevent camera contamination but let's see to improve it further with GPT 6.0 ASTRA

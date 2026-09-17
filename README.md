@@ -20,6 +20,75 @@ NC-TK17-PhysX is an experimental 32-bit Windows extension for The Klub 17. It ad
 
 The extension uses version-specific runtime hooks and is intended only for compatible TK17 installations. Back up your game files before installing or testing it.
 
+## Incoming collision strength
+
+`collision_strength` in `[breasts_physics]`, `[penis_physics]`,
+`[testicle_physics]` and `[butt_physics]` controls how strongly that body part
+responds to **other people**. It accepts floats from `0.1` to `1.0`, clamps values
+outside that range, and defaults to `1.0` when absent. Self-collisions and room
+collisions retain their existing response. The setting does not weaken the
+person's colliders as obstacles for others; the receiving person's setting applies.
+
+Global values in `Extensions/PhysX/Config.ini` apply to all people. A body's
+`.physx.ini` profile can override the same four section keys for its wearer.
+Changes use the existing configuration reload mechanism. Collision enable switches
+and scopes still apply; a scope without `_all` has no contacts from other people
+to weaken. The legacy `[body_colliders] collision_strength` is a separate setting.
+
+The four collision-strength sliders on the PhysX settings page read these global
+INI values when the page opens and save changes as floats. Opening the page
+does not write TK17's previously saved slider values back into the INI. Reopen
+the page after editing the INI externally to refresh the sliders.
+Slider events capture the numeric callback payload before TK17's adapter drops
+it when forwarding to its text handler. Saving does not require a cached widget.
+Repeated notifications for the same saved value do not rewrite the INI.
+Normal logs report `settings slider saved` and the loaded collision strengths;
+breast/butt contact traces show the receiving person's `incoming_strength`.
+
+Strength scales each external contact's displacement relative to the body's
+collision-free spring target, including its motion/gravity drive. Lower strengths
+therefore allow persistent overlap, instead of gradually converging to full
+separation. Inward-speed reduction is also weakened. Joint limits and full-strength
+self/room supports still apply; simultaneous constraints can affect the result.
+
+## Breast and butt collision movement limits
+
+`[breasts_physics]` and `[butt_physics]` accept optional `collision_min_offset`
+and `collision_max_offset` values, each containing three X,Y,Z floats:
+
+```ini
+collision_min_offset = -0.02,-0.01,-0.03
+collision_max_offset = 0.02,0.04,0.03
+```
+
+These are distances in the output bone parent's local coordinates, in scene
+units. They bound collision displacement relative to an independent copy of
+the normal translation spring, including jiggle and gravity sag. They apply
+to **all contacts: other people, self and room**. Bone orientation and parent
+scale determine their world directions; they are not camera axes.
+
+Minimum components must be zero or negative, and maximum components zero or
+positive. Zero on both sides of an axis blocks collision displacement on that
+axis while normal spring motion continues. Each omitted bound adds no new
+restriction. Leaving both keys out preserves the existing collision response.
+Malformed tuples are ignored; existing per-body inherited values are retained.
+
+The existing `bone_translation_max_offset` still caps total translation.
+Collision limits take priority over separation: contact can remain overlapping
+when it would require movement outside the permitted range. Incoming
+`collision_strength` continues to weaken only other-person contacts before
+the displacement bounds apply. Global values can be overridden independently
+in body `.physx.ini` profiles and use the usual configuration reload mechanism.
+The supplied config contains commented examples so no new bounds are imposed
+until enabled.
+
+For these two single-bone sections, use `min_angle`, `max_angle` and `gain`
+for rotational physics. Each new key takes precedence over its corresponding
+legacy `joint01_*` key in the same file. Old configs and body profiles continue
+to work; penis and testicle chains keep their numbered keys. Angles still
+accept XYZ values or a single value for all axes. If a minimum is omitted,
+it defaults to the negative maximum, as before.
+
 ## Build
 
 Install the MSYS2 MinGW 32-bit toolchain, then run:
@@ -29,6 +98,19 @@ Install the MSYS2 MinGW 32-bit toolchain, then run:
 ```
 
 The compiled DLL is written to `build\NC-TK17-PhysX.dll`.
+
+Hook5 collision visualization requires Hook5-Extended with the
+`nc_hook5_extended_register_debug_composite_callback` export (2026-09-14 or
+later). Install both updated DLLs. Debug outlines are composited into the
+completed scene before the GUI; no desktop overlay window is created. If the
+bridge is unavailable, PhysX logs this and skips Hook5 visualization. Native
+D3D8/OpenGL visualization and collision simulation do not require this bridge.
+Hook5 now draws batched 3D wireframes with reusable vertex storage instead of
+uploading a full-screen bitmap. The rings show physical collider volumes;
+contact queries additionally account for the moving object's radius. Outlines
+remain visible through scene geometry and below the GUI.
+Run `test_debug_composite.cmd` for geometry, D3D11 WARP rendering and actual
+collider-data tests.
 
 Run collision checks with Python and the same MinGW toolchain:
 
@@ -42,6 +124,9 @@ python run_free_motion_tests.py
 python run_binding_tests.py
 python run_gravity_response_tests.py
 python run_single_bone_contact_tests.py
+python run_collision_strength_config_tests.py
+python run_paired_config_tests.py
+python run_settings_slider_tests.py
 python run_collision_frame_tests.py
 ```
 

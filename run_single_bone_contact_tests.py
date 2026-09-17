@@ -39,11 +39,13 @@ static void body_chain_transform_row_vector3(const float v[3],const float m[9],f
 typedef struct {int ready,basis_valid,valid[5],contact_frame_valid;float view_position[5][3],contact_view_to_world[9],contact_world_origin[3];} body_chain_collider_person_state_t;
 static body_chain_collider_person_state_t body_chain_collider_states[4];
 static struct {int enabled,breasts_collision_enabled,butt_collision_enabled;float response_strength,collision_slop;} body_chain_collider_cfg={1,1,1,1,0};
-typedef struct {int room_collision_enabled,collision_scope,output_offset,override_animation;} body_chain_physics_config_t;
-static body_chain_physics_config_t breasts_physics_cfg={0,0,0x06c,0},butt_physics_cfg={0,0,0x06c,0};
+typedef struct {int room_collision_enabled,collision_scope,output_offset,override_animation;float collision_strength;
+ unsigned collision_offset_bounds;float collision_min_offset[3],collision_max_offset[3];} body_chain_physics_config_t;
+static body_chain_physics_config_t breasts_physics_cfg={0,0,0x06c,0,1.0f,0,{0},{0}},butt_physics_cfg={0,0,0x06c,0,1.0f,0,{0},{0}};
 static int breasts_physics_bone_translation_enabled,butt_physics_bone_translation_enabled;
 static int breasts_physics_bone_translation_offset=0x0e8,butt_physics_bone_translation_offset=0x0e8;
 typedef struct {float bone_translation[2][3],bone_translation_velocity[2][3],contact_previous_world[2][3];
+ float collision_free_translation[2][3],collision_free_velocity[2][3];
  int initialized,output_applied,bone_translation_applied,contact_translation_active,animation_rows_valid;
  void *source_joint_raw[2],*animation_joint_raw[2];
  float source_handoff[2][3],source_translation_handoff[2][3],rest_rotation[2][3],rotation[2][3],animation_rows[2][9];
@@ -110,7 +112,7 @@ static void integration_checks(void){
  unsigned rates[]={50,33,16,7,11};
  for(int butt=0;butt<2;butt++)for(int rate=0;rate<5;rate++){
   breasts_physics_person_state_t s;float parent[9],target[2][3]={{0}},push[2][3],limit[3]={.05f,.05f,.05f};
-  body_chain_physics_config_t cfg={1,1,0,0};reset(&s,parent,butt);room_enabled=room_corner=1;
+  body_chain_physics_config_t cfg={1,1,0,0,1.0f,0,{0},{0}};reset(&s,parent,butt);room_enabled=room_corner=1;
   int node=butt?2:0;DWORD now=1000;
   for(int frame=0;frame<800;frame++){
    float *sample=body_chain_collider_states[0].view_position[node];
@@ -131,7 +133,7 @@ static void integration_checks(void){
 }
 static void body_and_history(void){
  breasts_physics_person_state_t s;float parent[9],target[2][3]={{0}},push[2][3],limit[3]={.05f,.05f,.05f};
- body_chain_physics_config_t cfg={0,1,0,0};reset(&s,parent,0);
+ body_chain_physics_config_t cfg={0,1,0,0,1.0f,0,{0},{0}};reset(&s,parent,0);
  body_chain_collider_states[1].ready=body_chain_collider_states[1].basis_valid=1;
  body_chain_collider_states[1].valid[4]=1;body_chain_collider_states[1].view_position[4][0]=-.18f;
  single_bone_contact_step(0,0,&s,&cfg,1000,16,target,200,6,limit,push);
@@ -164,7 +166,7 @@ static void output_checks(void){
 static void camera_and_body_rest(void){
  for(int butt=0;butt<2;butt++)for(int camera=0;camera<2;camera++){
   breasts_physics_person_state_t s;float parent[9],target[2][3]={{0}},push[2][3],limit[3]={.05f,.05f,.05f};
-  body_chain_physics_config_t cfg={0,1,0,0};reset(&s,parent,butt);int node=butt?2:0;
+  body_chain_physics_config_t cfg={0,1,0,0,1.0f,0,{0},{0}};reset(&s,parent,butt);int node=butt?2:0;
   if(camera){
    captured_camera_inverse[0]=0;captured_camera_inverse[1]=1;captured_camera_inverse[4]=-1;captured_camera_inverse[5]=0;
    for(int p=0;p<4;p++) {
@@ -193,7 +195,7 @@ static void camera_and_body_rest(void){
 }
 static void paired_support(void){
  breasts_physics_person_state_t a,b;float parent[9],target[2][3]={{0}},push[2][3],limit[3]={.05f,.05f,.05f};
- body_chain_physics_config_t cfg={0,1,0,0};reset(&a,parent,0);memset(&b,0,sizeof(b));
+ body_chain_physics_config_t cfg={0,1,0,0,1.0f,0,{0},{0}};reset(&a,parent,0);memset(&b,0,sizeof(b));
  b.translation_parent_joint_raw[0]=b.translation_parent_joint_raw[1]=parent;
  body_chain_collider_states[1].ready=body_chain_collider_states[1].basis_valid=1;
  body_chain_collider_states[1].valid[0]=1;body_chain_collider_states[1].view_position[0][0]=-.18f;
@@ -203,7 +205,104 @@ static void paired_support(void){
  near(body_chain_collider_states[0].view_position[0][0],0); /* Chain/global proxies untouched. */
  puts("PASS: paired bodies see prior single-bone output within the frame, without double recovery or changes to global colliders");
 }
-int main(void){math_checks();integration_checks();body_and_history();output_checks();camera_and_body_rest();paired_support();return 0;}
+static void incoming_strength_checks(void){
+ const float strengths[]={.1f,.25f,1.0f};
+ for(int butt=0;butt<2;butt++)for(int mode=0;mode<3;mode++)for(int k=0;k<3;k++){
+  breasts_physics_person_state_t s;float parent[9],target[2][3]={{0}},push[2][3],limit[3]={.05f,.05f,.05f};
+  body_chain_physics_config_t cfg={0,1,0,0,strengths[k],0,{0},{0}};reset(&s,parent,butt);
+  int axis=mode==2?1:0,node=butt?2:0;
+  if(mode==2){room_enabled=cfg.room_collision_enabled=1;floor_height=-.08f;}
+  else {
+   int other=mode==0?1:0;
+   body_chain_collider_states[other].ready=body_chain_collider_states[other].basis_valid=1;
+   body_chain_collider_states[other].valid[4]=1;
+   body_chain_collider_states[other].view_position[4][0]=-.18f;
+  }
+  s.bone_translation_velocity[0][axis]=-1;
+  single_bone_contact_step(0,butt,&s,&cfg,1000,16,target,0,0,limit,push);
+  float strength=mode==0?strengths[k]:1.0f;
+  near(s.bone_translation[0][axis],strength*.02f);
+  near(s.bone_translation_velocity[0][axis],-(1.0f-strength));
+  near(body_chain_collider_states[0].view_position[node][axis],0);
+ }
+ /* Simultaneous weak external, hard self and hard room planes, including a
+    duplicate normal: soft merging must never discard the hard velocity stop. */
+ single_bone_contacts_t c={0};float x[3]={0},v[3]={-1,-2,-3},lo[3]={-.1f,-.1f,-.1f},hi[3]={.1f,.1f,.1f};
+ float nx[3]={1,0,0},ny[3]={0,1,0},nz[3]={0,0,1};
+ single_bone_store_strength(&c,nx,.002f,.1f);
+ single_bone_store(&c,ny,.02f);single_bone_store(&c,nz,.03f);
+ single_bone_project(&c,lo,hi,x);single_bone_velocity(&c,x,hi,v);
+ near(x[0],.002f);near(x[1],.02f);near(x[2],.03f);
+ near(v[0],-.9f);near(v[1],0);near(v[2],0);
+ single_bone_store(&c,nx,.002f);v[0]=-1;single_bone_velocity(&c,x,hi,v);near(v[0],0);
+ puts("PASS: breasts/butt incoming strength 0.1/0.25/1 scales external separation and velocity only; self, room and mixed hard supports retain full response");
+}
+static void sustained_strength_checks(void){
+ const unsigned rates[]={7,16,33,50};
+ for(int butt=0;butt<2;butt++)for(int mode=0;mode<3;mode++)for(int rate=0;rate<4;rate++){
+  breasts_physics_person_state_t s;float parent[9],target[2][3]={{0}},push[2][3],limit[3]={.05f,.05f,.05f};
+  body_chain_physics_config_t cfg={0,1,0,0,1,0,{0},{0}};reset(&s,parent,butt);
+  int axis=mode==2?1:0,node=butt?2:0;DWORD now=1000;
+  if(mode==2){room_enabled=cfg.room_collision_enabled=1;floor_height=-.08f;}
+  else {int other=mode==0?1:0;
+   body_chain_collider_states[other].ready=body_chain_collider_states[other].basis_valid=1;
+   body_chain_collider_states[other].valid[4]=1;body_chain_collider_states[other].view_position[4][0]=-.18f;
+  }
+  const float strength[]={1,.1f,.25f,.1f,1};
+  for(int phase=0;phase<5;phase++){
+   cfg.collision_strength=strength[phase];target[0][axis]=phase==3?.005f:0;
+   float applied=mode==0?strength[phase]:1;
+   float expected=target[0][axis]+applied*(.02f-target[0][axis]);
+   for(int frame=0;frame<600;frame++){
+    memcpy(body_chain_collider_states[0].view_position[node],s.bone_translation[0],sizeof(float)*3);
+    now+=rates[rate];single_bone_contact_step(0,butt,&s,&cfg,now,rates[rate],target,200,6,limit,push);
+    if(frame>400)near(s.bone_translation[0][axis],expected);
+   }
+  }
+ }
+ puts("PASS: sustained breast/butt overlap stays weak across thousands of frames, strength changes, nonzero free targets and 20/30/60/144 Hz; self and room support stay full");
+}
+static void collision_offset_checks(void){
+ const unsigned rates[]={7,16,33,50};
+ for(int butt=0;butt<2;butt++)for(int mode=0;mode<3;mode++)
+ for(int axis=0;axis<3;axis++)for(int sign=-1;sign<=1;sign+=2)for(int rate=0;rate<4;rate++){
+  breasts_physics_person_state_t s,free_state={0};float parent[9],target[2][3]={{0}},push[2][3],limit[3]={.05f,.05f,.05f};
+  body_chain_physics_config_t cfg={0,1,0,0,1,3,{-.006f,-.008f,-.01f},{.004f,.005f,.006f}};
+  body_chain_physics_config_t free_cfg={0,1,0,0,1,0,{0},{0}};
+  reset(&s,parent,butt);int node=butt?2:0;DWORD now=1000;
+  /* Map each tested local axis (including reflected axes) onto world up. */
+  for(int a=0;a<3;a++){float t=parent[axis*3+a];parent[axis*3+a]=parent[3+a];parent[3+a]=t;}
+  for(int a=0;a<3;a++)parent[axis*3+a]*=sign;
+  free_state.translation_parent_joint_raw[0]=free_state.translation_parent_joint_raw[1]=parent;
+  if(mode==2){room_enabled=cfg.room_collision_enabled=1;floor_height=-.08f;}
+  else {int other=mode==0?1:0;body_chain_collider_states[other].ready=body_chain_collider_states[other].basis_valid=1;
+   body_chain_collider_states[other].valid[4]=1;body_chain_collider_states[other].view_position[4][1]=-.18f;}
+  for(int frame=0;frame<220;frame++){
+   now+=rates[rate];
+   if(frame==60) cfg.collision_strength=.1f;
+   if(frame==100) {cfg.collision_strength=1;cfg.collision_offset_bounds=0;}
+   if(frame==140) {cfg.collision_offset_bounds=3;memset(cfg.collision_min_offset,0,sizeof(cfg.collision_min_offset));memset(cfg.collision_max_offset,0,sizeof(cfg.collision_max_offset));}
+   for(int a=0;a<3;a++) target[0][a]=frame>=140?.012f*sinf(frame*.13f+a):0;
+   /* Independent no-contact run is the expected jiggle/sag reference. */
+   int saved_room=room_enabled;room_enabled=0;body_chain_collider_cfg.enabled=0;
+   single_bone_contact_step(0,butt,&free_state,&free_cfg,now,rates[rate],target,200,6,limit,push);
+   room_enabled=saved_room;body_chain_collider_cfg.enabled=1;
+   body_chain_transform_row_vector3(s.bone_translation[0],parent,body_chain_collider_states[0].view_position[node]);
+   single_bone_contact_step(0,butt,&s,&cfg,now,rates[rate],target,200,6,limit,push);
+   for(int a=0;a<3;a++){
+    near(s.collision_free_translation[0][a],free_state.bone_translation[0][a]);
+    float extra=s.bone_translation[0][a]-free_state.bone_translation[0][a];
+    if(cfg.collision_offset_bounds){assert(extra>=cfg.collision_min_offset[a]-2e-5f);assert(extra<=cfg.collision_max_offset[a]+2e-5f);}
+    if(frame>=140)near(extra,0);
+   }
+   if(frame==59)near(s.bone_translation[0][axis],sign>0?cfg.collision_max_offset[axis]:cfg.collision_min_offset[axis]);
+   if(frame==99 && mode==0)near(s.bone_translation[0][axis],sign*.002f);
+   if(frame==139)near(s.bone_translation[0][axis],sign*.02f);
+  }
+ }
+ puts("PASS: XYZ collision offsets bound self/other/room contacts on breasts and butt, including reflected parents and sustained contact at 20/30/60/144 Hz; strength, live removal and zero-bound normal spring motion remain correct");
+}
+int main(void){math_checks();integration_checks();body_and_history();output_checks();camera_and_body_rest();paired_support();incoming_strength_checks();sustained_strength_checks();collision_offset_checks();return 0;}
 '''
 build=ROOT/'build';build.mkdir(exist_ok=True)
 c=build/'single_bone_contact_test.c';c.write_text(source)

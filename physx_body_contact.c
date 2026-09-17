@@ -331,6 +331,8 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
     COLLISION_PROFILE_SCOPE(profile_solve, CP_BODY_SOLVE);
     float points[4][3];
     float velocity_jacobians[BODY_CHAIN_MAX_CONTACTS][3][2];
+    body_chain_contact_t strength_contacts[BODY_CHAIN_MAX_CONTACTS];
+    float incoming_velocity[3][3],velocity_floor[BODY_CHAIN_MAX_CONTACTS]={0};
     float position_impulse[BODY_CHAIN_MAX_CONTACTS]={0};
     float best_correction[3][2]={{0}};
     float best_error,initial_error,best_norm=0;
@@ -339,10 +341,29 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
         state->collision_step_dt : 1.0f/60.0f,1.0f/240.0f,.05f);
     float relaxation=physx_clampf(body_chain_collider_cfg.response_strength,0.0f,1.0f);
     int iterations=(int)physx_clampf((float)body_chain_collider_cfg.collision_iterations,1.0f,6.0f)*8;
-    int pass,c,j,a;
+    int pass,c,j,a,soft_count=0;
     memset(correction,0,sizeof(float)*6);
     body_contact_limit_velocity(cfg,state,NULL,segment_count);
     if(body_chain_collider_cfg.response_strength<=0.0f) return;
+    for(c=0;c<count;c++) if(contacts[c].strength<1.0f) soft_count++;
+    if(soft_count) {
+        float free_delta[3][2]={{0}},free_points[4][3];
+        for(j=0;j<segment_count;j++) for(a=0;a<2;a++) {
+            int axis=a?cfg->vertical_output_axis:cfg->horizontal_output_axis;
+            free_delta[j][a]=state->collision_free_target[j][axis]-state->angle[j][axis];
+        }
+        body_contact_predict(cfg,state,base,free_delta,free_points);
+        memcpy(strength_contacts,contacts,(size_t)count*sizeof(*contacts));
+        contacts=strength_contacts;
+        for(c=0;c<count;c++) if(contacts[c].strength<1.0f) {
+            float p[3],free_sep=0;
+            body_contact_point(free_points,&contacts[c],p);
+            for(a=0;a<3;a++) free_sep+=(p[a]-contacts[c].body[a])*contacts[c].normal[a];
+            /* The spring target excludes earlier collision displacement, so
+               persistent overlap cannot ratchet weak response up to full. */
+            contacts[c].target_sep=free_sep+contacts[c].strength*(contacts[c].target_sep-free_sep);
+        }
+    }
     memcpy(points,base,sizeof(points));
     best_error=initial_error=body_contact_overlap_error(points,contacts,count);
     /* More than one support must constrain the same candidate. No joint is
@@ -400,8 +421,16 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
        Free separation is untouched. Repeated passes restore all
        corner-support inequalities. */
     COLLISION_PROFILE_SCOPE(profile_velocity, CP_BODY_VELOCITY);
+    memcpy(incoming_velocity,state->velocity,sizeof(incoming_velocity));
+    if(soft_count) body_contact_predict(cfg,state,base,correction,points);
     for(pass=0;pass<8;pass++) for(c=0;c<count;c++) {
         float jac[3][2],denom=0,vn=0,lambda;
+        if(contacts[c].strength<1.0f) {
+            float p[3],sep=0;
+            body_contact_point(points,&contacts[c],p);
+            for(a=0;a<3;a++) sep+=(p[a]-contacts[c].body[a])*contacts[c].normal[a];
+            if(sep>contacts[c].target_sep+.00002f) continue;
+        }
         /* Only velocity changes during these eight passes. Angles, final
            correction, contact normals and the sampled pose remain fixed, so
            each contact's geometric Jacobian is identical on every pass.
@@ -409,6 +438,14 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
         if(pass==0) {
             body_contact_jacobian(cfg,state,base,correction,&contacts[c],contacts[c].normal,jac,0);
             memcpy(velocity_jacobians[c],jac,sizeof(jac));
+            if(contacts[c].strength<1.0f) {
+                float incoming=0;
+                for(j=0;j<segment_count;j++) for(a=0;a<2;a++)
+                    incoming+=jac[j][a]*incoming_velocity[j][a?cfg->vertical_output_axis:cfg->horizontal_output_axis];
+                /* Fixed for all passes: remove only the requested fraction of
+                   inward speed. Self/room contacts still require zero. */
+                velocity_floor[c]=(1.0f-contacts[c].strength)*fminf(0,incoming);
+            }
         } else {
             memcpy(jac,velocity_jacobians[c],sizeof(jac));
         }
@@ -417,8 +454,8 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
             denom+=jac[j][a]*jac[j][a]*body_contact_inverse_inertia(state,j,a);
             vn+=jac[j][a]*state->velocity[j][axis];
         }
-        if(vn>=0 || denom<1e-10f) continue;
-        lambda=-vn/denom;
+        if(vn>=velocity_floor[c] || denom<1e-10f) continue;
+        lambda=(velocity_floor[c]-vn)/denom;
         for(j=0;j<segment_count;j++) for(a=0;a<2;a++)
             state->velocity[j][a?cfg->vertical_output_axis:cfg->horizontal_output_axis]+=
                 lambda*jac[j][a]*body_contact_inverse_inertia(state,j,a);

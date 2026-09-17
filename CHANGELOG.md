@@ -1,3 +1,74 @@
+# Breast/butt collision offsets and setting aliases - 2026-09-16
+
+- Add optional XYZ `collision_min_offset` and `collision_max_offset` for
+  breasts and butt. Bound displacement from the normal translation spring
+  for other-person, self and room contacts, allowing overlap at the limit.
+  An independent collision-free spring preserves normal jiggle/gravity motion
+  and prevents the allowance accumulating across frames. Omitted bounds keep
+  existing behavior; existing total translation limits still apply.
+- Accept `min_angle`, `max_angle` and `gain` for these single-bone sections,
+  with per-key `joint01_*` fallbacks. Support both naming schemes and optional
+  offset overrides in body profiles. Keep chain section names unchanged.
+- Update the supplied config to the simpler names and add commented offset
+  examples. Reject malformed, non-finite or incorrectly signed offset tuples.
+- Regression coverage includes all XYZ directions, reflected parents, self,
+  other-person and room contacts, sustained contact, live bounds/strength
+  changes and zero-bound spring motion at 20/30/60/144 Hz. Windows INI tests
+  cover aliases, body-profile inheritance and missing/invalid settings.
+  In-game validation of the new offsets remains pending.
+
+# Incoming collision strength - 2026-09-16
+
+- Add `collision_strength` (float, clamped to 0.1-1.0, default 1.0) to the
+  breast, penis, testicle and butt physics sections, including body profiles.
+  Only the receiver's response to other people is reduced; self/room contacts
+  and outgoing collider geometry retain their existing behavior.
+- Anchor weak contact separation to the collision-free spring target so
+  sustained contact stays weak instead of accumulating full displacement.
+  Preserve the original `1.0` path and hard self/room supports.
+- Bind all four settings sliders to their global INI values. Capture the
+  numeric payload at the ConfigEditor callback adapter before it discards
+  that payload when forwarding to the text handler. Suppress initialization
+  callbacks and stale widget writes; restore INI values when the page opens.
+- Skip duplicate slider saves to avoid redundant INI writes and log entries.
+  Compare the persisted value so external edits are still respected. Normal
+  logs report saved values and loaded strengths; breast/butt contact traces
+  include the effective receiver strength.
+- Automated tests cover configuration, both contact solvers, sustained contact
+  at 20/30/60/144 Hz, live strength changes, mixed hard/soft supports and the
+  native x86 callback adapter. Settings tests include missing widgets, bounds,
+  initialization, reopening, duplicate events and external INI edits.
+- User confirmed the intended weak breast/butt collision behavior and working
+  in-game slider updates, and approved the feature. Duplicate-save cleanup
+  is covered by automated regression tests.
+
+# Hook5 collision wireframes - 2026-09-14
+
+- Replace the CPU bitmap overlay with one batched D3D11 line draw and a reusable
+  vertex buffer. Upload only visible candidate line vertices, with no full-screen
+  image clear, GDI objects or texture upload. Empty batches issue no draw.
+- Draw oriented 3D ellipsoid rings and tapered capsules from collider positions,
+  radii and per-body scaling. Keep physical target volumes separate from the
+  moving object's radius added by contact queries.
+- Preserve homogeneous perspective and clip individual lines at the frustum;
+  remove the Hook5 path's screen-radius clamps and axis-aligned oval approximation.
+- Preserve the confirmed layer below the GUI. Native D3D8/OpenGL and collision
+  response remain unchanged. This follow-up needs only the new PhysX DLL.
+- Geometry, WARP rendering/state/clipping and actual collider-data tests cover
+  the new path. In-game appearance and performance comparison remain pending.
+
+# Hook5 collision visualization layering - 2026-09-14
+
+- Replace the topmost desktop collision window with a debug layer drawn into
+  Hook5's completed scene before TK17's GUI. Collision outlines can no longer
+  cover other applications, and the game's GUI is drawn above them.
+- Requires the updated Hook5-Extended debug scene callback. An older or missing
+  Hook5-Extended skips Hook5 collision visualization and logs the requirement.
+- Preserve native D3D8/OpenGL rendering and collision simulation. The new
+  callback coexists with Liquids and also supports Liquids being disabled.
+- Builds, WARP pixel/state/resize tests and scene-hook regression checks pass;
+  in-game GUI, Alt+Tab and fullscreen validation remains pending.
+
 # Gravity during collider warmup - 2026-09-13
 
 - Follow-up in-game testing showed that the filter change below did not resolve

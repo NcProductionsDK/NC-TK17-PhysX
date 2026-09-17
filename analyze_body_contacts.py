@@ -60,8 +60,8 @@ int main(void) {
     float normal[3]={0,1,0},a[3]={-.025f,0,0},b[3]={-.09f,0,0};
     float body[3]={0,-.01f,0};
     int count=0;
-    body_chain_store_contact(contacts,&count,8,0,.25f,.005f,a,body,normal);
-    body_chain_store_contact(contacts,&count,8,0,.9f,.004f,b,body,normal);
+    body_chain_store_contact(contacts,&count,8,0,.25f,.005f,a,body,normal,1.0f);
+    body_chain_store_contact(contacts,&count,8,0,.9f,.004f,b,body,normal,1.0f);
     assert(count==2 && contacts[0].segment_t==.25f);
     printf("FIXED: contacts at segment_t=0.25 and 0.90 with identical normals retained=%d\n",count);
     {

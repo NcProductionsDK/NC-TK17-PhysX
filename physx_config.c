@@ -2,7 +2,17 @@ typedef struct physx_settings_binding_t {
     const char *param_name;
     const char *section;
     const char *key;
+    void *slider_widget;
 } physx_settings_binding_t;
+
+static float profile_collision_strength(const char *section,float fallback,const char *path);
+typedef int (THISCALL *physx_create_slider_t)(void *,void *,void *,void *,float,int,int);
+static physx_create_slider_t real_PhysX_CreateSlider;
+static int physx_create_slider_hook_installed;
+typedef void (__cdecl *physx_config_editor_callback_t)(
+    void *, const char *, const char *, DWORD, const float *);
+static physx_config_editor_callback_t real_PhysX_ConfigEditorCallback;
+static int physx_config_editor_callback_hook_installed;
 
 typedef struct body_profile_log_observer_t {
     int initialized;
@@ -14,27 +24,32 @@ typedef struct body_profile_log_observer_t {
     int metadata_valid;
 } body_profile_log_observer_t;
 
-static const physx_settings_binding_t physx_settings_bindings[] = {
-    { "NCPhysXBreastsPhysics", BREASTS_PHYSICS_CONFIG_SECTION, "enabled" },
-    { "NCPhysXPenisPhysics", PENIS_PHYSICS_CONFIG_SECTION, "enabled" },
-    { "NCPhysXTesticlePhysics", TESTICLE_PHYSICS_CONFIG_SECTION, "enabled" },
-    { "NCPhysXButtPhysics", BUTT_PHYSICS_CONFIG_SECTION, "enabled" },
-    { "NCPhysXBodyColliders", BODY_COLLIDERS_CONFIG_SECTION, "enabled" },
-    { "NCPhysXBreastsCollision", BODY_COLLIDERS_CONFIG_SECTION, "breasts_collision_enabled" },
-    { "NCPhysXButtCollision", BODY_COLLIDERS_CONFIG_SECTION, "butt_collision_enabled" },
-    { "NCPhysXPenisCollision", BODY_COLLIDERS_CONFIG_SECTION, "penis_collision_enabled" },
-    { "NCPhysXTesticleCollision", BODY_COLLIDERS_CONFIG_SECTION, "testicle_collision_enabled" },
-    { "NCPhysXBreastsCollisionScope", BREASTS_PHYSICS_CONFIG_SECTION, "collision_scope" },
-    { "NCPhysXButtCollisionScope", BUTT_PHYSICS_CONFIG_SECTION, "collision_scope" },
-    { "NCPhysXPenisCollisionScope", PENIS_PHYSICS_CONFIG_SECTION, "collision_scope" },
-    { "NCPhysXTesticleCollisionScope", TESTICLE_PHYSICS_CONFIG_SECTION, "collision_scope" },
-    { "NCPhysXColliderVisuals", BODY_COLLIDERS_CONFIG_SECTION, "debug_draw" },
-    { "NCPhysXWorldGravity", "physics_environment", "gravity_apply_to_body_chain" },
-    { "NCPhysXWorldWind", "physics_environment", "wind_enabled" },
-    { "NCPhysXBreastsRoomCollision", BREASTS_PHYSICS_CONFIG_SECTION, "room_collision_enabled" },
-    { "NCPhysXPenisRoomCollision", PENIS_PHYSICS_CONFIG_SECTION, "room_collision_enabled" },
-    { "NCPhysXTesticleRoomCollision", TESTICLE_PHYSICS_CONFIG_SECTION, "room_collision_enabled" },
-    { "NCPhysXButtRoomCollision", BUTT_PHYSICS_CONFIG_SECTION, "room_collision_enabled" }
+static physx_settings_binding_t physx_settings_bindings[] = {
+    { "NCPhysXBreastsPhysics", BREASTS_PHYSICS_CONFIG_SECTION, "enabled", NULL },
+    { "NCPhysXPenisPhysics", PENIS_PHYSICS_CONFIG_SECTION, "enabled", NULL },
+    { "NCPhysXTesticlePhysics", TESTICLE_PHYSICS_CONFIG_SECTION, "enabled", NULL },
+    { "NCPhysXButtPhysics", BUTT_PHYSICS_CONFIG_SECTION, "enabled", NULL },
+    { "NCPhysXBodyColliders", BODY_COLLIDERS_CONFIG_SECTION, "enabled", NULL },
+    { "NCPhysXBreastsCollision", BODY_COLLIDERS_CONFIG_SECTION, "breasts_collision_enabled", NULL },
+    { "NCPhysXButtCollision", BODY_COLLIDERS_CONFIG_SECTION, "butt_collision_enabled", NULL },
+    { "NCPhysXPenisCollision", BODY_COLLIDERS_CONFIG_SECTION, "penis_collision_enabled", NULL },
+    { "NCPhysXTesticleCollision", BODY_COLLIDERS_CONFIG_SECTION, "testicle_collision_enabled", NULL },
+    { "NCPhysXBreastsCollisionScope", BREASTS_PHYSICS_CONFIG_SECTION, "collision_scope", NULL },
+    { "NCPhysXButtCollisionScope", BUTT_PHYSICS_CONFIG_SECTION, "collision_scope", NULL },
+    { "NCPhysXPenisCollisionScope", PENIS_PHYSICS_CONFIG_SECTION, "collision_scope", NULL },
+    { "NCPhysXTesticleCollisionScope", TESTICLE_PHYSICS_CONFIG_SECTION, "collision_scope", NULL },
+    { "NCPhysXColliderVisuals", BODY_COLLIDERS_CONFIG_SECTION, "debug_draw", NULL },
+    { "NCPhysXPauseHiddenGenitals", "defaults", "pause_hidden_genitals", NULL },
+    { "NCPhysXWorldGravity", "physics_environment", "gravity_apply_to_body_chain", NULL },
+    { "NCPhysXWorldWind", "physics_environment", "wind_enabled", NULL },
+    { "NCPhysXBreastsRoomCollision", BREASTS_PHYSICS_CONFIG_SECTION, "room_collision_enabled", NULL },
+    { "NCPhysXPenisRoomCollision", PENIS_PHYSICS_CONFIG_SECTION, "room_collision_enabled", NULL },
+    { "NCPhysXTesticleRoomCollision", TESTICLE_PHYSICS_CONFIG_SECTION, "room_collision_enabled", NULL },
+    { "NCPhysXButtRoomCollision", BUTT_PHYSICS_CONFIG_SECTION, "room_collision_enabled", NULL },
+    { "NCPhysXBreastsCollisionStrength", BREASTS_PHYSICS_CONFIG_SECTION, "collision_strength", NULL },
+    { "NCPhysXPenisCollisionStrength", PENIS_PHYSICS_CONFIG_SECTION, "collision_strength", NULL },
+    { "NCPhysXTesticleCollisionStrength", TESTICLE_PHYSICS_CONFIG_SECTION, "collision_strength", NULL },
+    { "NCPhysXButtCollisionStrength", BUTT_PHYSICS_CONFIG_SECTION, "collision_strength", NULL }
 };
 
 static int physx_settings_bool_value(const char *value, int *enabled)
@@ -82,7 +97,7 @@ static const char *physx_settings_collision_scope_value(const char *value)
     return NULL;
 }
 
-static const physx_settings_binding_t *physx_settings_binding_by_name(
+static physx_settings_binding_t *physx_settings_binding_by_name(
     const char *name)
 {
     size_t i;
@@ -325,7 +340,179 @@ static void physx_sync_spinbox_from_ini(
                  binding->param_name, requested);
 }
 
-static int THISCALL hook_Customizer_BuildControls_PhysX(
+/* Slider.Value uses the same native F32 dispatch as Liquids. */
+static int physx_slider_widget_value(void *slider,float *out_value)
+{
+    typedef float (THISCALL *get_float_t)(void *,DWORD);
+    BYTE *metadata,*dispatch_table;get_float_t getter;float value;
+    if(!slider || !out_value ||
+       !ptr_readable((BYTE*)slider-SCRIPT_OBJECT_META_BACK_OFFSET,sizeof(metadata))) return 0;
+    memcpy(&metadata,(BYTE*)slider-SCRIPT_OBJECT_META_BACK_OFFSET,sizeof(metadata));
+    if(!metadata || !ptr_readable(metadata+0x3b4,sizeof(dispatch_table))) return 0;
+    memcpy(&dispatch_table,metadata+0x3b4,sizeof(dispatch_table));
+    if(!dispatch_table || !ptr_readable(dispatch_table+0x80,sizeof(getter))) return 0;
+    memcpy(&getter,dispatch_table+0x80,sizeof(getter));
+    if(!ptr_executable((const void*)getter)) return 0;
+    value=getter(slider,0x02fff0ed);
+    if(!isfinite(value)) return 0;
+    *out_value=value;
+    return 1;
+}
+
+static int physx_slider_widget_set_value(void *slider,float value)
+{
+    typedef void (THISCALL *set_float_t)(void *,DWORD,float);
+    BYTE *metadata,*dispatch_table;set_float_t setter;
+    if(!slider || !isfinite(value) ||
+       !ptr_readable((BYTE*)slider-SCRIPT_OBJECT_META_BACK_OFFSET,sizeof(metadata))) return 0;
+    memcpy(&metadata,(BYTE*)slider-SCRIPT_OBJECT_META_BACK_OFFSET,sizeof(metadata));
+    if(!metadata || !ptr_readable(metadata+0x3b4,sizeof(dispatch_table))) return 0;
+    memcpy(&dispatch_table,metadata+0x3b4,sizeof(dispatch_table));
+    if(!dispatch_table || !ptr_readable(dispatch_table+0x84,sizeof(setter))) return 0;
+    memcpy(&setter,dispatch_table+0x84,sizeof(setter));
+    if(!ptr_executable((const void*)setter)) return 0;
+    setter(slider,0x02fff0ed,value);
+    return 1;
+}
+
+static void physx_sync_slider_from_ini(const physx_settings_binding_t *binding,void *widget)
+{
+    float requested,current;int synced;
+    if(!binding || !widget) return;
+    if(!config_path[0]) config_file_path(config_path,sizeof(config_path));
+    requested=profile_collision_strength(binding->section,1.0f,config_path);
+    if(physx_slider_widget_value(widget,&current) && fabsf(current-requested)<=.00001f) return;
+    physx_settings_sync_depth++;
+    synced=physx_slider_widget_set_value(widget,requested);
+    physx_settings_sync_depth--;
+    if(!synced || defaults_cfg.debug)
+        log_line("settings slider sync param=\"%s\" ini=%.6g success=%d",binding->param_name,requested,synced);
+}
+
+static void physx_write_slider_value(const physx_settings_binding_t *binding, float value)
+{
+    char normalized[32], saved[32];
+    if (physx_settings_sync_depth || !binding || !isfinite(value)) return;
+    if (!config_path[0]) config_file_path(config_path, sizeof(config_path));
+    value = physx_clampf(value, .1f, 1.0f);
+    _snprintf(normalized, sizeof(normalized), "%.6g", value);
+    normalized[sizeof(normalized) - 1] = 0;
+    /* TK17 can emit the same change more than once. Compare the persisted
+       text instead of a cached value so external INI edits still take effect. */
+    GetPrivateProfileStringA(binding->section, binding->key, "", saved,
+                             sizeof(saved), config_path);
+    if (strcmp(saved, normalized) == 0) {
+        physx_sync_slider_from_ini(binding, binding->slider_widget);
+        return;
+    }
+    if (WritePrivateProfileStringA(binding->section, binding->key, normalized, config_path)) {
+        log_line("settings slider saved param=\"%s\" value=%s ini=[%s] %s note=\"normal INI hot-reload scheduled\"",
+                 binding->param_name, normalized, binding->section, binding->key);
+        physx_sync_slider_from_ini(binding, binding->slider_widget);
+    } else {
+        log_line("settings write failed param=\"%s\" ini=[%s] %s path=\"%s\"",
+                 binding->param_name, binding->section, binding->key, config_path);
+    }
+}
+
+static void physx_write_slider_setting(const physx_settings_binding_t *binding,const char *text)
+{
+    float value;char *end;
+    if(physx_settings_sync_depth || !binding) return;
+    if(!physx_slider_widget_value(binding->slider_widget,&value)) {
+        if(!text || !text[0]) return;
+        value=strtof(text,&end);
+        if(end==text || !isfinite(value)) return;
+        while(*end==' ' || *end=='\t') end++;
+        if(*end) return;
+    }
+    physx_write_slider_value(binding,value);
+}
+
+/* TK17-158.001's cdecl callback at 0x4ff510 receives a numeric payload as
+   argument five, but forwards only the name and text to 0x4fe280 (the two
+   other stack slots are padding). Capture the float before that adapter
+   discards it. Slider events need not have text or a cached widget. */
+static void __cdecl hook_PhysX_ConfigEditorCallback(
+    void *self, const char *parameter, const char *text, DWORD value_arg,
+    const float *numeric_value)
+{
+    const char *name = stringref_cstr_a(parameter);
+    const physx_settings_binding_t *binding = physx_settings_binding_by_name(name);
+    int is_strength = binding && strcmp(binding->key, "collision_strength") == 0;
+    int was_syncing = physx_settings_sync_depth != 0;
+    int captured = 0;
+    float value = 0;
+    if (is_strength && !was_syncing &&
+        ptr_readable(numeric_value, sizeof(value))) {
+        memcpy(&value, numeric_value, sizeof(value));
+        captured = isfinite(value);
+    }
+    /* Prevent the downstream text handler from saving an old widget value,
+       and prevent any native rebuild from recursively persisting defaults. */
+    if (is_strength) physx_settings_sync_depth++;
+    if (real_PhysX_ConfigEditorCallback)
+        real_PhysX_ConfigEditorCallback(self, parameter, text, value_arg, numeric_value);
+    if (is_strength) physx_settings_sync_depth--;
+    if (captured) {
+        physx_write_slider_value(binding, value);
+    } else if (is_strength && !was_syncing) {
+        log_line("settings slider event rejected param=\"%s\" reason=\"missing or non-finite numeric payload\"",
+                 binding->param_name);
+    }
+}
+
+static void patch_physx_config_editor_callback(void)
+{
+    static const BYTE expected[6] = {0x55, 0x8b, 0xec, 0x8b, 0x4d, 0x08};
+    HMODULE executable = GetModuleHandleA(NULL);
+    BYTE *target;
+    if (physx_config_editor_callback_hook_installed || !executable) return;
+    target = (BYTE*)executable + 0x000ff510;
+    if (!ptr_executable(target) || !ptr_readable(target, sizeof(expected))) return;
+    if (target[0] != 0xe9 && memcmp(target, expected, sizeof(expected))) {
+        log_line("settings slider numeric callback unavailable target=%p", target);
+        return;
+    }
+    if (install_inline_hook(target, (void*)hook_PhysX_ConfigEditorCallback,
+                            sizeof(expected), (void**)&real_PhysX_ConfigEditorCallback)) {
+        physx_config_editor_callback_hook_installed = 1;
+        log_line("settings slider numeric callback installed target=%p previous=%p",
+                 target, (void*)real_PhysX_ConfigEditorCallback);
+    }
+}
+
+static int THISCALL hook_PhysX_CreateSlider(void *self,void *parameter,void *record,
+    void *parent,float y,int preset_index,int has_labels)
+{
+    char name[128];void *widget=NULL;physx_settings_binding_t *binding;
+    int result=real_PhysX_CreateSlider ? real_PhysX_CreateSlider(self,parameter,record,parent,y,preset_index,has_labels):0;
+    if(preset_index>=0 || !record || !physx_custom_parameter_name(parameter,name,sizeof(name))) return result;
+    binding=physx_settings_binding_by_name(name);
+    if(!binding || strcmp(binding->key,"collision_strength") ||
+       !ptr_readable((BYTE*)record+4,sizeof(widget))) return result;
+    memcpy(&widget,(BYTE*)record+4,sizeof(widget));
+    binding->slider_widget=widget;
+    if(widget) physx_sync_slider_from_ini(binding,widget);
+    return result;
+}
+
+static void patch_physx_slider_creation(void)
+{
+    static const BYTE expected[6]={0x55,0x8b,0xec,0x83,0xe4,0xc0};
+    HMODULE executable=GetModuleHandleA(NULL);BYTE *target;
+    if(physx_create_slider_hook_installed || !executable) return;
+    target=(BYTE*)executable+0x001c34f0;
+    if(!ptr_executable(target) || !ptr_readable(target,sizeof(expected))) return;
+    if(target[0]!=0xe9 && memcmp(target,expected,sizeof(expected))) return;
+    if(install_inline_hook(target,(void*)hook_PhysX_CreateSlider,sizeof(expected),
+        (void**)&real_PhysX_CreateSlider)) {
+        physx_create_slider_hook_installed=1;
+        log_line("settings slider creation hook installed target=%p previous=%p",target,(void*)real_PhysX_CreateSlider);
+    }
+}
+
+static int physx_build_controls_and_sync(
     void *self, void *arg1, void *arg2, void *arg3)
 {
     int result;
@@ -361,16 +548,40 @@ static int THISCALL hook_Customizer_BuildControls_PhysX(
         char parameter_name[128];
         void *record = records[index];
         void *widget = NULL;
-        const physx_settings_binding_t *binding;
+        physx_settings_binding_t *binding;
         if (!parameters[index] || !record ||
             !physx_custom_parameter_name(parameters[index], parameter_name,
                                          sizeof(parameter_name))) continue;
         binding = physx_settings_binding_by_name(parameter_name);
+        if (binding && strcmp(binding->key, "collision_strength") == 0) {
+            /* Main slider is record+0x04; preset slots start at +0x08 and
+               must retain their own preset values. Spinboxes use +0x24. */
+            if (ptr_readable((BYTE*)record + 0x04, sizeof(widget))) {
+                memcpy(&widget, (BYTE*)record + 0x04, sizeof(widget));
+                binding->slider_widget = widget;
+                if (widget) physx_sync_slider_from_ini(binding, widget);
+            }
+            continue;
+        }
         if (!binding ||
             !ptr_readable((BYTE*)record + 0x24, sizeof(widget))) continue;
         memcpy(&widget, (BYTE*)record + 0x24, sizeof(widget));
         if (widget) physx_sync_spinbox_from_ini(binding, widget);
     }
+    return result;
+}
+
+static int THISCALL hook_Customizer_BuildControls_PhysX(
+    void *self,void *arg1,void *arg2,void *arg3)
+{
+    int result;size_t i;
+    for(i=0;i<sizeof(physx_settings_bindings)/sizeof(physx_settings_bindings[0]);i++)
+        physx_settings_bindings[i].slider_widget=NULL;
+    /* Original BuildControls can emit ParamChange while restoring saved UI
+       values. Keep Config.ini authoritative throughout creation and sync. */
+    physx_settings_sync_depth++;
+    result=physx_build_controls_and_sync(self,arg1,arg2,arg3);
+    physx_settings_sync_depth--;
     return result;
 }
 
@@ -381,6 +592,8 @@ static void patch_config_editor_spinbox_sync(void)
     };
     HMODULE executable;
     BYTE *target;
+    patch_physx_config_editor_callback();
+    patch_physx_slider_creation();
     if (config_editor_spinbox_sync_hook_installed) return;
     executable = GetModuleHandleA(NULL);
     if (!executable) return;
@@ -1101,6 +1314,10 @@ static int body_profile_parse_virtual_body_scene_a(const char *path,
     return 0;
 }
 
+/* Type information belongs to the person even without an optional sidecar.
+   Updated only by explicit per-person body scene loads, not UI selection intent. */
+static int body_profile_loaded_body_slot[4]={-1,-1,-1,-1};
+
 static void body_profile_note_virtual_body_scene_a(const char *path,
                                                    const char *source)
 {
@@ -1110,6 +1327,7 @@ static void body_profile_note_virtual_body_scene_a(const char *path,
                                                  &body_slot)) {
         return;
     }
+    body_profile_loaded_body_slot[person_index]=body_slot;
     body_profile_signature_ambiguity_logged[person_index] = 0;
     body_profile_signature_ambiguity_hits[person_index] = 0;
     body_profile_queue_pending_bind_a(person_index, body_slot, GetTickCount(),
@@ -1978,6 +2196,17 @@ static void migrate_legacy_penis_physics_section(void)
 
 static float profile_float(const char *section, const char *key,
                            float fallback, const char *path);
+static float profile_collision_strength(const char *section,float fallback,const char *path)
+{
+    char buf[128],*end;float value;
+    GetPrivateProfileStringA(section,"collision_strength","",buf,sizeof(buf),path);
+    if(!buf[0]) return fallback;
+    value=strtof(buf,&end);
+    if(end==buf) return fallback;
+    while(*end==' ' || *end=='\t') end++;
+    if(*end) return fallback;
+    return isfinite(value)?physx_clampf(value,0.1f,1.0f):fallback;
+}
 static int profile_bool(const char *section, const char *key,
                         int fallback, const char *path);
 static int parse_axis_name(const char *axis);
@@ -2052,6 +2281,65 @@ static int body_profile_bool_if_present(const char *section,
     return 1;
 }
 
+static void profile_paired_angle_settings(const char *section, const char *path,
+    body_chain_physics_config_t *cfg, int overlay)
+{
+    char value[128];
+    const char *max_key = profile_string_found(section, "max_angle", value, sizeof(value), path)
+        ? "max_angle" : "joint01_max_angle";
+    const char *min_key = profile_string_found(section, "min_angle", value, sizeof(value), path)
+        ? "min_angle" : "joint01_min_angle";
+    const char *gain_key = profile_string_found(section, "gain", value, sizeof(value), path)
+        ? "gain" : "joint01_gain";
+    int max_present = profile_string_found(section, max_key, value, sizeof(value), path);
+    int min_present = profile_string_found(section, min_key, value, sizeof(value), path);
+    if (!overlay || max_present)
+        profile_vec3_or_float(section, max_key, cfg->max_angle, cfg->link_max_angle[0], path);
+    if (!overlay || max_present || min_present)
+        profile_min_angle_vec3_or_float(section, min_key, cfg->link_max_angle[0],
+                                        cfg->link_min_angle[0], path);
+    cfg->link_gain[0] = profile_float(section, gain_key, overlay ? cfg->link_gain[0] : 1.0f, path);
+}
+
+static void profile_paired_collision_offsets(const char *section, const char *path,
+    body_chain_physics_config_t *cfg, int overlay)
+{
+    const char *keys[2] = {"collision_min_offset", "collision_max_offset"};
+    int bound, axis;
+    if (!overlay) {
+        cfg->collision_offset_bounds = 0;
+        memset(cfg->collision_min_offset, 0, sizeof(cfg->collision_min_offset));
+        memset(cfg->collision_max_offset, 0, sizeof(cfg->collision_max_offset));
+    }
+    for (bound = 0; bound < 2; bound++) {
+        char text[128], *cursor, *end;
+        float values[3];
+        if (!profile_string_found(section, keys[bound], text, sizeof(text), path)) continue;
+        cursor = text;
+        for (axis = 0; axis < 3; axis++) {
+            values[axis] = strtof(cursor, &end);
+            if (end == cursor || !isfinite(values[axis]) ||
+                (bound ? values[axis] < 0 : values[axis] > 0)) break;
+            cursor = end;
+            while (*cursor == ' ' || *cursor == '\t') cursor++;
+            if (axis < 2) {
+                if (*cursor == ',') cursor++;
+                else if (cursor == end) break;
+            }
+        }
+        /* A whole XYZ tuple is required. Zero must be inside the range,
+           otherwise a bound would move a bone even without any collision. */
+        if (axis != 3 || (*cursor && *cursor != ';')) {
+            log_line("settings ignored [%s] %s reason=\"expected three finite XYZ offsets; minimum <= 0, maximum >= 0\"",
+                     section, keys[bound]);
+            continue;
+        }
+        memcpy(bound ? cfg->collision_max_offset : cfg->collision_min_offset,
+               values, sizeof(values));
+        cfg->collision_offset_bounds |= 1u << bound;
+    }
+}
+
 static void body_profile_overlay_paired_physics_section(
     const char *section, const char *path,
     body_chain_physics_config_t *cfg, int breasts)
@@ -2074,8 +2362,6 @@ static void body_profile_overlay_paired_physics_section(
     char value[64];
     int channel;
     int enabled;
-    int max_angle_present;
-    int min_angle_present;
     if (!section || !path || !path[0] || !cfg) return;
 
     enabled = cfg->enabled;
@@ -2089,6 +2375,8 @@ static void body_profile_overlay_paired_physics_section(
         section, "wind_scale", cfg->wind_scale, path);
     cfg->collision_scope = profile_body_chain_collision_scope(
         section, cfg->collision_scope, path);
+    cfg->collision_strength = profile_collision_strength(
+        section, cfg->collision_strength, path);
     cfg->room_collision_enabled = profile_bool(
         section, "room_collision_enabled",
         cfg->room_collision_enabled, path);
@@ -2156,21 +2444,8 @@ static void body_profile_overlay_paired_physics_section(
         section, "stiffness", cfg->stiffness, path);
     cfg->damping = profile_float(
         section, "damping", cfg->damping, path);
-    max_angle_present = profile_string_found(
-        section, "joint01_max_angle", value, sizeof(value), path);
-    min_angle_present = profile_string_found(
-        section, "joint01_min_angle", value, sizeof(value), path);
-    if (max_angle_present) {
-        profile_vec3_or_float(section, "joint01_max_angle", cfg->max_angle,
-                              cfg->link_max_angle[0], path);
-    }
-    if (max_angle_present || min_angle_present) {
-        profile_min_angle_vec3_or_float(
-            section, "joint01_min_angle", cfg->link_max_angle[0],
-            cfg->link_min_angle[0], path);
-    }
-    cfg->link_gain[0] = profile_float(
-        section, "joint01_gain", cfg->link_gain[0], path);
+    profile_paired_angle_settings(section, path, cfg, 1);
+    profile_paired_collision_offsets(section, path, cfg, 1);
     cfg->interval_ms = GetPrivateProfileIntA(
         section, "interval_ms", cfg->interval_ms, path);
     cfg->update_rate_hz = body_update_clamp_rate((int)GetPrivateProfileIntA(
@@ -2245,6 +2520,8 @@ static void body_profile_overlay_body_physics_sections(int person_index,
     body_chain_physics_cfg.room_collision_enabled = profile_bool(
         PENIS_PHYSICS_CONFIG_SECTION, "room_collision_enabled",
         body_chain_physics_cfg.room_collision_enabled, path);
+    body_chain_physics_cfg.collision_strength = profile_collision_strength(
+        PENIS_PHYSICS_CONFIG_SECTION, body_chain_physics_cfg.collision_strength, path);
 
     body_chain_physics_cfg.translation_scale[0] =
         profile_float(PENIS_PHYSICS_CONFIG_SECTION,
@@ -2387,6 +2664,8 @@ static void body_profile_overlay_body_physics_sections(int person_index,
     testicle_physics_cfg.room_collision_enabled = profile_bool(
         TESTICLE_PHYSICS_CONFIG_SECTION, "room_collision_enabled",
         testicle_physics_cfg.room_collision_enabled, path);
+    testicle_physics_cfg.collision_strength = profile_collision_strength(
+        TESTICLE_PHYSICS_CONFIG_SECTION, testicle_physics_cfg.collision_strength, path);
 
     testicle_physics_cfg.translation_scale[0] =
         profile_float(TESTICLE_PHYSICS_CONFIG_SECTION,
@@ -2917,12 +3196,16 @@ static void handle_physx_settings_change(const char *param_ref,
     const char *collision_scope;
     int enabled;
     size_t i;
-    if (!param_name || _strnicmp(param_name, "NCPhysX", 7) != 0) return;
+    if (physx_settings_sync_depth || !param_name || _strnicmp(param_name, "NCPhysX", 7) != 0) return;
     if (!config_path[0]) config_file_path(config_path, sizeof(config_path));
     migrate_legacy_penis_physics_section();
     for (i = 0; i < sizeof(physx_settings_bindings) / sizeof(physx_settings_bindings[0]); i++) {
         const physx_settings_binding_t *binding = &physx_settings_bindings[i];
         if (strcmp(param_name, binding->param_name) != 0) continue;
+        if (strcmp(binding->key, "collision_strength") == 0) {
+            physx_write_slider_setting(binding,string_value);
+            return;
+        }
         if (strcmp(binding->key, "collision_scope") == 0) {
             collision_scope = physx_settings_collision_scope_value(string_value);
             if (!collision_scope) {
@@ -3338,6 +3621,7 @@ static void load_global_config(void)
     defaults_cfg.damping = profile_float("defaults", "damping", defaults_cfg.damping, config_path);
     defaults_cfg.limit_angle = profile_float("defaults", "limit_angle", defaults_cfg.limit_angle, config_path);
     defaults_cfg.debug = profile_bool("defaults", "debug", defaults_cfg.debug, config_path);
+    physx_pause_hidden_genitals = profile_bool("defaults", "pause_hidden_genitals", 0, config_path);
     defaults_cfg.performance_profile =
         profile_bool("defaults", "performance_profile",
                      defaults_cfg.performance_profile, config_path);
@@ -3902,6 +4186,8 @@ static void load_global_config(void)
     body_chain_physics_cfg.room_collision_enabled = profile_bool(
         PENIS_PHYSICS_CONFIG_SECTION, "room_collision_enabled",
         body_chain_physics_cfg.room_collision_enabled, config_path);
+    body_chain_physics_cfg.collision_strength = profile_collision_strength(
+        PENIS_PHYSICS_CONFIG_SECTION, 1.0f, config_path);
     GetPrivateProfileStringA(PENIS_PHYSICS_INTERNAL_CONFIG_SECTION, "root_offset", "", buf, sizeof(buf), config_path);
     trim_in_place(buf);
     body_chain_physics_cfg.root_offset = parse_offset_value(buf, body_chain_physics_cfg.root_offset);
@@ -4396,6 +4682,8 @@ static void load_global_config(void)
     testicle_physics_cfg.room_collision_enabled = profile_bool(
         TESTICLE_PHYSICS_CONFIG_SECTION, "room_collision_enabled",
         testicle_physics_cfg.room_collision_enabled, config_path);
+    testicle_physics_cfg.collision_strength = profile_collision_strength(
+        TESTICLE_PHYSICS_CONFIG_SECTION, 1.0f, config_path);
     testicle_physics_cfg.translation_scale[0] =
         profile_float(TESTICLE_PHYSICS_CONFIG_SECTION,
                       "translation_horizontal_scale",
@@ -4560,6 +4848,8 @@ static void load_global_config(void)
         profile_body_chain_collision_scope(
             BREASTS_PHYSICS_CONFIG_SECTION,
             breasts_physics_global_cfg.collision_scope, config_path);
+    breasts_physics_global_cfg.collision_strength = profile_collision_strength(
+        BREASTS_PHYSICS_CONFIG_SECTION, 1.0f, config_path);
     breasts_physics_global_cfg.room_collision_enabled = profile_bool(
         BREASTS_PHYSICS_CONFIG_SECTION, "room_collision_enabled",
         breasts_physics_global_cfg.room_collision_enabled, config_path);
@@ -4672,18 +4962,10 @@ static void load_global_config(void)
                           "bone_translation_max_offset", 0.015f,
                           breasts_physics_bone_translation_max_offset,
                           config_path);
-    profile_vec3_or_float(BREASTS_PHYSICS_CONFIG_SECTION,
-                          "joint01_max_angle",
-                          breasts_physics_global_cfg.max_angle,
-                          breasts_physics_global_cfg.link_max_angle[0],
-                          config_path);
-    profile_min_angle_vec3_or_float(
-        BREASTS_PHYSICS_CONFIG_SECTION, "joint01_min_angle",
-        breasts_physics_global_cfg.link_max_angle[0],
-        breasts_physics_global_cfg.link_min_angle[0], config_path);
-    breasts_physics_global_cfg.link_gain[0] =
-        profile_float(BREASTS_PHYSICS_CONFIG_SECTION, "joint01_gain",
-                      breasts_physics_global_cfg.link_gain[0], config_path);
+    profile_paired_angle_settings(BREASTS_PHYSICS_CONFIG_SECTION, config_path,
+                                 &breasts_physics_global_cfg, 0);
+    profile_paired_collision_offsets(BREASTS_PHYSICS_CONFIG_SECTION, config_path,
+                                    &breasts_physics_global_cfg, 0);
     breasts_physics_global_cfg.interval_ms =
         GetPrivateProfileIntA(BREASTS_PHYSICS_CONFIG_SECTION, "interval_ms",
                               breasts_physics_global_cfg.interval_ms,
@@ -5002,6 +5284,8 @@ static void load_global_config(void)
         profile_body_chain_collision_scope(
             BUTT_PHYSICS_CONFIG_SECTION,
             butt_physics_global_cfg.collision_scope, config_path);
+    butt_physics_global_cfg.collision_strength = profile_collision_strength(
+        BUTT_PHYSICS_CONFIG_SECTION, 1.0f, config_path);
     butt_physics_global_cfg.room_collision_enabled = profile_bool(
         BUTT_PHYSICS_CONFIG_SECTION, "room_collision_enabled",
         butt_physics_global_cfg.room_collision_enabled, config_path);
@@ -5103,18 +5387,10 @@ static void load_global_config(void)
                           "bone_translation_max_offset", 0.015f,
                           butt_physics_bone_translation_max_offset,
                           config_path);
-    profile_vec3_or_float(BUTT_PHYSICS_CONFIG_SECTION,
-                          "joint01_max_angle",
-                          butt_physics_global_cfg.max_angle,
-                          butt_physics_global_cfg.link_max_angle[0],
-                          config_path);
-    profile_min_angle_vec3_or_float(
-        BUTT_PHYSICS_CONFIG_SECTION, "joint01_min_angle",
-        butt_physics_global_cfg.link_max_angle[0],
-        butt_physics_global_cfg.link_min_angle[0], config_path);
-    butt_physics_global_cfg.link_gain[0] =
-        profile_float(BUTT_PHYSICS_CONFIG_SECTION, "joint01_gain",
-                      butt_physics_global_cfg.link_gain[0], config_path);
+    profile_paired_angle_settings(BUTT_PHYSICS_CONFIG_SECTION, config_path,
+                                 &butt_physics_global_cfg, 0);
+    profile_paired_collision_offsets(BUTT_PHYSICS_CONFIG_SECTION, config_path,
+                                    &butt_physics_global_cfg, 0);
     butt_physics_global_cfg.interval_ms =
         GetPrivateProfileIntA(BUTT_PHYSICS_CONFIG_SECTION, "interval_ms",
                               butt_physics_global_cfg.interval_ms,
@@ -5978,6 +6254,11 @@ static void load_global_config(void)
              testicle_physics_cfg.gravity_horizontal_curve,
              testicle_physics_cfg.gravity_vertical_curve,
              physics_environment_cfg.gravity_response_ms);
+    log_line("incoming collision-strength breasts=%.3f butt=%.3f penis=%.3f testicle=%.3f",
+             breasts_physics_global_cfg.collision_strength,
+             butt_physics_global_cfg.collision_strength,
+             body_chain_physics_cfg.collision_strength,
+             testicle_physics_cfg.collision_strength);
     log_line("body-chain collision-scope breasts=%s butt=%s penis=%s testicle=%s note=\"full_body_all preserves legacy behavior; scopes without _all only refresh and test the wearer\"",
              body_chain_collision_scope_name(
                  breasts_physics_global_cfg.collision_scope),
