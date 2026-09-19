@@ -107,7 +107,7 @@ static void profile_paired_angle_settings(const char *section, const char *path,
     int min_present = profile_string_found(section, min_key, value, sizeof(value), path);
     if (!overlay || max_present)
         profile_vec3_or_float(section, max_key, cfg->max_angle, cfg->link_max_angle[0], path);
-    if (!overlay || max_present || min_present)
+    if (!overlay || min_present)
         profile_min_angle_vec3_or_float(section, min_key, cfg->link_max_angle[0],
                                         cfg->link_min_angle[0], path);
     cfg->link_gain[0] = profile_float(section, gain_key, overlay ? cfg->link_gain[0] : 1.0f, path);
@@ -182,7 +182,8 @@ int main(int argc,char **argv){
   WritePrivateProfileStringA(section,"max_angle","15",argv[2]);
   WritePrivateProfileStringA(section,"gain","0.9",argv[2]);
   profile_paired_angle_settings(section,argv[2],&cfg,1);
-  assert_close(cfg.link_gain[0],.9f);assert_close(cfg.link_max_angle[0][2],15);assert_close(cfg.link_min_angle[0][2],-15);
+  /* A missing minimum inherits independently from the changed maximum. */
+  assert_close(cfg.link_gain[0],.9f);assert_close(cfg.link_max_angle[0][2],15);assert_close(cfg.link_min_angle[0][2],-12);
   WritePrivateProfileStringA(section,NULL,NULL,argv[1]);
   profile_paired_angle_settings(section,argv[1],&cfg,0);
   assert_close(cfg.link_gain[0],1);assert_close(cfg.link_max_angle[0][2],30);assert_close(cfg.link_min_angle[0][2],-30);

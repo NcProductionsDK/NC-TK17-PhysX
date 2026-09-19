@@ -47,6 +47,8 @@ static void physx_late_ownership_once_for_render_frame(void)
 static HRESULT WINAPI hook_d3d8_Present(IDirect3DDevice8 *self, const RECT *src_rect, const RECT *dst_rect,
                                         HWND dst_window_override, const RGNDATA *dirty_region)
 {
+    if (physx_shutting_down)
+        return real_d3d8_Present ? real_d3d8_Present(self,src_rect,dst_rect,dst_window_override,dirty_region) : D3DERR_INVALIDCALL;
     HRESULT hr;
     int hook5_active = physx_d3d8_hook5_active();
     if (hook5_active) physx_hook5_collision_register();
@@ -73,6 +75,8 @@ static HRESULT WINAPI hook_d3d8_SetTransform(IDirect3DDevice8 *self,
 
 static HRESULT WINAPI hook_d3d8_EndScene(IDirect3DDevice8 *self)
 {
+    if (physx_shutting_down)
+        return real_d3d8_EndScene ? real_d3d8_EndScene(self) : D3DERR_INVALIDCALL;
     HRESULT hr;
     int hook5_active = physx_d3d8_hook5_active();
     physx_tick_once_for_render_frame();
@@ -85,6 +89,8 @@ static HRESULT WINAPI hook_d3d8_EndScene(IDirect3DDevice8 *self)
 
 static BOOL WINAPI hook_SwapBuffers(HDC hdc)
 {
+    if (physx_shutting_down)
+        return real_SwapBuffers ? real_SwapBuffers(hdc) : FALSE;
     BOOL ok;
     physx_tick_once_for_render_frame();
     physx_late_ownership_once_for_render_frame();
@@ -208,6 +214,7 @@ static FARPROC WINAPI hook_GetProcAddress(HMODULE mod, LPCSTR name)
 
 static void __cdecl hook_SetTSNodeName(void *object, const void *name_ref)
 {
+    runtime_exact_lookup_invalidate();
     const char *name = stringref_cstr_a(name_ref);
     static int body_interest_log_count;
     static int addon_interest_log_count;
@@ -263,6 +270,7 @@ static void __cdecl hook_SetTSNodeName(void *object, const void *name_ref)
         }
     }
     if (real_SetTSNodeName) real_SetTSNodeName(object, name_ref);
+    runtime_exact_lookup_invalidate();
 }
 
 static void patch_d3d8_object(IDirect3D8 *d3d)

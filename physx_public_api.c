@@ -111,6 +111,7 @@ NCTK17PhysX_SetBlendControlOverlay(void *control, float weight, int active)
 static int physx_public_get_blend_control_overlay(void *control,
                                                   float *weight)
 {
+    if (physx_shutting_down) return 0;
     int index;
     DWORD now;
     if (!control || !weight ||
@@ -172,6 +173,7 @@ static PVOID volatile physx_post_animation_callbacks[
 
 static void physx_public_run_post_animation_callbacks(void)
 {
+    if (physx_shutting_down) return;
     int index;
     for (index = 0;
          index < NC_TK17_PHYSX_POST_ANIMATION_CALLBACK_SLOTS;

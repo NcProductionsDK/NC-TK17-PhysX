@@ -335,13 +335,19 @@ static int body_chain_collider_update_settle_gate(
     if (state->settle_sample_count < 1000000) {
         state->settle_sample_count++;
     }
-    if (runtime_mode &&
+    if ((runtime_mode ||
+         (body_chain_collider_cfg.root_local_offsets && state->basis_valid &&
+          now - state->settle_start_tick >= BODY_CHAIN_COLLIDER_SETTLE_MS)) &&
         state->settle_sample_count >= BODY_CHAIN_COLLIDER_STABLE_SAMPLES) {
         /* FreeMode bodies are normally animated continuously, so waiting for
            their root to become quiet can suppress collision indefinitely.
            Three coherent body-local samples are enough to reject a transient
            load/source jump while restoring collision promptly. Missing or
-           discontinuous live nodes still fail before reaching this branch. */
+           discontinuous live nodes still fail before reaching this branch.
+           PoseEditor keeps its full startup interval, but a confirmed local
+           basis does not also need a quiet view-space root: orbit/pan/zoom
+           move that root without changing collision geometry. Room placement
+           is confirmed independently by body_collision_frame_update. */
         body_chain_collider_capture_settle_sample(state);
         state->ready = 1;
         if ((body_chain_collider_cfg.diagnostic || defaults_cfg.debug) &&
@@ -349,9 +355,11 @@ static int body_chain_collider_update_settle_gate(
              now - state->last_settle_log_tick >=
                 (DWORD)body_chain_collider_cfg.health_log_ms)) {
             state->last_settle_log_tick = now;
-            log_line("body-chain-colliders runtime-ready person=\"%s\" stable_samples=%d note=\"FreeMode collision resumed from coherent body-local samples without waiting for the animated root to become quiet\"",
+            log_line("body-chain-colliders %s-ready person=\"%s\" stable_samples=%d settle_ms=%lu note=\"collision resumed from coherent body-local samples without waiting for the view-space root to become quiet; room placement retains its separate camera guard\"",
+                     runtime_mode ? "runtime" : "local",
                      person ? person : "",
-                     state->settle_sample_count);
+                     state->settle_sample_count,
+                     (unsigned long)(now - state->settle_start_tick));
         }
         return 1;
     }
@@ -3509,6 +3517,7 @@ static int body_chain_passive_chain_points_in_frame(
     DWORD now)
 {
     int i;
+    float adjusted[4][3];
     if (!chain_frame || !body_state || !points ||
         !body_state->chain_points_ready ||
         !body_state->chain_points_update_tick ||
@@ -3518,11 +3527,13 @@ static int body_chain_passive_chain_points_in_frame(
              BODY_CHAIN_COLLISION_POINT_HOLD_MS)) {
         return 0;
     }
+    memcpy(adjusted, body_state->chain_local_point, sizeof(adjusted));
+    body_chain_penis_offset_points(adjusted, 1.0f);
     for (i = 0; i < 4; i++) {
         if (!body_state->chain_point_valid[i] ||
             !body_chain_collider_local_point_in_chain_space(
                 chain_frame, body_state,
-                body_state->chain_local_point[i], points[i])) {
+                adjusted[i], points[i])) {
             return 0;
         }
     }
@@ -3650,7 +3661,9 @@ static int body_chain_active_penis_cross_points_local(int person_index,
     if (!state->initialized || !state->active_logged) {
         return 0;
     }
-    return body_chain_penis_cross_sample(&body_chain_collider_states[person_index],state,points,now);
+    if (!body_chain_penis_cross_sample(&body_chain_collider_states[person_index],state,points,now)) return 0;
+    body_chain_penis_offset_points(points, 1.0f);
+    return 1;
 }
 
 static int body_chain_active_testicle_cross_points_local(int person_index,
@@ -4475,6 +4488,7 @@ static void body_chain_compute_collider_projection(int person_index,
     int collision_scope_includes_hands;
     int collision_scope_is_full_body;
     float owner_chain_radius;
+    body_chain_collider_config_t query_collider_cfg;
     float owner_collision_slop;
     float owner_collision_strength;
     const float contact_soft_margin = 0.0020f;
@@ -4516,7 +4530,8 @@ static void body_chain_compute_collider_projection(int person_index,
         !collision_scope_is_full_body) {
         body_chain_prepare_hand_edge_index();
     }
-    owner_chain_radius = body_chain_collider_cfg.chain_radius;
+    owner_chain_radius = target_is_testicle ?
+        body_chain_collider_cfg.chain_radius : body_chain_penis_radius();
     owner_collision_slop = body_chain_collider_cfg.collision_slop;
     owner_collision_strength = target_is_testicle ?
         testicle_physics_cfg.collision_strength : body_chain_physics_cfg.collision_strength;
@@ -4567,6 +4582,7 @@ static void body_chain_compute_collider_projection(int person_index,
         chain_state->collision_prev_chain_points_ready = 0;
         return;
     }
+    if (!target_is_testicle) body_chain_penis_offset_points(chain_points, 1.0f);
     pose_source = chain_points_from_engine == 1 ?
         "engine-pivots-fresh" :
         (chain_points_from_engine == 2 ?
@@ -4792,8 +4808,9 @@ static void body_chain_compute_collider_projection(int person_index,
         float current_collider_sweep[BODY_COLLIDER_NODE_COUNT];
         int active_node_index;
         int passive_chain_ready = 0;
-        if (!collision_scope_all_persons &&
-            collider_person_index != person_index) {
+        if ((!collision_scope_all_persons &&
+             collider_person_index != person_index) ||
+            !body_collision_person_allowed(person_index, collider_person_index)) {
             chain_state->collision_prev_collider_ready
                 [collider_person_index] = 0;
             continue;
@@ -4825,6 +4842,9 @@ static void body_chain_compute_collider_projection(int person_index,
                        person_index, passive_chain_points, now)) {
             passive_chain_ready = 2;
         }
+        query_collider_cfg = body_chain_collider_cfg;
+        query_collider_cfg.chain_radius = owner_chain_radius;
+        body_chain_collider_cfg_ptr = &query_collider_cfg;
         memset(current_collider_sweep, 0, sizeof(current_collider_sweep));
         for (active_node_index = 0;
              active_node_index < projection_cache->active_node_count;
@@ -4872,8 +4892,9 @@ static void body_chain_compute_collider_projection(int person_index,
                 int same_person_cross =
                     same_person_active_penis_cross ||
                     same_person_active_testicle_cross;
-                float collider_chain_radius =
-                    body_chain_collider_cfg.chain_radius;
+                float collider_chain_radius = passive_chain_ready == 2 ?
+                    body_chain_collider_person_cfg[collider_person_index].chain_radius :
+                    body_chain_penis_radius();
                 float same_person_cross_radius =
                     owner_chain_radius * 0.75f;
                 int passive_segment_count =
@@ -5159,6 +5180,8 @@ static void body_chain_compute_collider_projection(int person_index,
         chain_state->collision_prev_collider_ready[collider_person_index] = 1;
     }
 
+    body_profile_set_active_person_config(person_index);
+
     if (room_response_enabled) {
         LONG room_track_generation =
             InterlockedCompareExchange(&named_node_generation, 0, 0);
@@ -5345,7 +5368,7 @@ static void body_chain_compute_collider_projection(int person_index,
     if (emit_log && contact_count && (defaults_cfg.debug || body_chain_collider_cfg.diagnostic) &&
         (!chain_state->collision_solve_log_tick || now-chain_state->collision_solve_log_tick>=250u)) {
         float solved[4][3];
-        body_contact_predict(
+        body_contact_predict_geometry(
             target_is_testicle ? &testicle_physics_cfg : &body_chain_physics_cfg,
             chain_state, chain_points, correction, solved);
         chain_state->collision_solve_log_tick=now;

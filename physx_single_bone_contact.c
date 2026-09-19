@@ -46,6 +46,7 @@ static void single_bone_body_contacts(int person,int butt,int side,int scope,
     for(p=0;p<4;p++) {
         body_chain_collider_person_state_t *other=&body_chain_collider_states[p];
         if(!body_chain_collision_scope_all_persons(scope) && p!=person) continue;
+        if(!body_collision_person_allowed(person,p)) continue;
         if(!other->ready || !other->basis_valid) continue;
         for(node=0;node<BODY_COLLIDER_NODE_COUNT;node++) {
             float normal[3],distance,depth,target_radius;

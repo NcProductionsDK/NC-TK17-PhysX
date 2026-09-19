@@ -114,10 +114,10 @@ typedef struct {float gravity_horizontal_strength,gravity_vertical_strength;} bo
 typedef struct {
     body_dynamics_t dynamics;int dynamics_valid,dynamics_gravity_valid,dynamics_gravity_active,gravity_probe_promoted,gravity_camera_hold_active;
     float dynamics_gravity_direction[3],angle[3][3];
-    gravity_sample_t geometry_sample;
+    gravity_sample_t geometry_sample, gravity_sample, gravity_reference_sample;
     void *root_raw;
 } body_chain_person_state_t;
-static struct {int gravity_apply_to_body_chain;float world_gravity[3],gravity_response_ms;int gravity_horizontal_tail_axis,gravity_vertical_tail_axis;} physics_environment_cfg={1,{0,-1,0},100,2,1};
+static struct {int gravity_apply_to_body_chain;float world_gravity[3],gravity_response_ms;int gravity_horizontal_tail_axis,gravity_vertical_tail_axis;float gravity_horizontal_basis_sign,gravity_vertical_basis_sign,gravity_horizontal_secondary_basis_sign;char gravity_basis_node[64];} physics_environment_cfg={1,{0,-1,0},100,2,1,1,1,1,"root"};
 static struct {int debug;} defaults_cfg;
 static void log_line(const char *fmt,...){(void)fmt;}
 static float physx_clampf(float v,float a,float b){return fmaxf(a,fminf(b,v));}
@@ -133,7 +133,7 @@ static float physx_vec3_len(const float *v){return sqrtf(v[0]*v[0]+v[1]*v[1]+v[2
 static float body_chain_clamp_link_axis_angle(const body_chain_physics_config_t *cfg,int j,int a,float value){(void)cfg;(void)j;(void)a;return fminf(80,fmaxf(-80,value));}
 static int body_chain_limit_total_rotation(const body_chain_physics_config_t *cfg,float v[3][3],float velocity[3][3],int count){(void)cfg;(void)v;(void)velocity;(void)count;return 0;}
 '''
-source+=function('body_chain_apply_link_inertia')+function('body_chain_shape_gravity')+function('body_chain_shape_penis_gravity')
+source+=function('body_chain_apply_link_inertia')+function('body_chain_confirmed_geometry_direction')+function('body_chain_shape_gravity')+function('body_chain_shape_penis_gravity')
 source+=function('profile_float','physx_config.c')
 assignments=re.findall(r'body_chain_physics_cfg\.gravity_(?:horizontal|vertical)_strength\s*=\s*physx_clampf\([\s\S]*?;', (ROOT/'physx_config.c').read_text())
 assert len(assignments)==4

@@ -19,6 +19,21 @@ static int body_contact_predict(const body_chain_physics_config_t *cfg,
     return body_chain_live_points_with_delta_cfg(cfg,base,correction,points);
 }
 
+/* Contact points may be offset; reconstruct raw pivots for kinematics,
+   then apply the same body-local offsets to every predicted contact shape. */
+static int body_contact_predict_geometry(const body_chain_physics_config_t *cfg,
+    const body_chain_person_state_t *state, const float base[4][3],
+    const float correction[3][2], float points[4][3])
+{
+    float pivots[4][3];
+    int penis = cfg == &body_chain_physics_cfg;
+    memcpy(pivots, base, sizeof(pivots));
+    if (penis) body_chain_penis_offset_points(pivots, -1.0f);
+    if (!body_contact_predict(cfg, state, pivots, correction, points)) return 0;
+    if (penis) body_chain_penis_offset_points(points, 1.0f);
+    return 1;
+}
+
 static int body_contact_candidate_points(
     const body_chain_person_state_t *state,
     const body_chain_physics_config_t *cfg, DWORD now, float points[4][3])
@@ -201,8 +216,8 @@ static void body_contact_jacobian(const body_chain_physics_config_t *cfg,
         float angle=state->angle[j][axis]+correction[j][a];
         memcpy(plus,correction,sizeof(plus));memcpy(minus,correction,sizeof(minus));
         plus[j][a]+=.1f;minus[j][a]-=.1f;
-        body_contact_predict(cfg,state,base,plus,pp);
-        body_contact_predict(cfg,state,base,minus,mp);
+        body_contact_predict_geometry(cfg,state,base,plus,pp);
+        body_contact_predict_geometry(cfg,state,base,minus,mp);
         body_contact_point(pp,contact,p);body_contact_point(mp,contact,m);
         for(k=0;k<3;k++) value+=(p[k]-m[k])*direction[k]/.2f;
         if(respect_limits && ((value>0 && body_chain_clamp_link_axis_angle(cfg,j,axis,angle+.01f)<=angle+.00001f) ||
@@ -278,7 +293,7 @@ static void body_contact_refine_combined(const body_chain_physics_config_t *cfg,
 {
     COLLISION_PROFILE_SCOPE(profile_refine, CP_BODY_REFINE);
     float points[4][3],error;int pass,c,j,a;
-    body_contact_predict(cfg,state,base,correction,points);
+    body_contact_predict_geometry(cfg,state,base,correction,points);
     error=body_contact_overlap_error(points,contacts,count);
     for(pass=0;pass<8 && error>1e-10f;pass++) {
         float gradient[3][2]={{0}},denom=0,step[3][2],norm=0;
@@ -312,7 +327,7 @@ static void body_contact_refine_combined(const body_chain_physics_config_t *cfg,
                 trial[j][a]=body_chain_clamp_link_axis_angle(cfg,j,axis,state->angle[j][axis]+value)-state->angle[j][axis];
             }
             body_contact_bound_correction(trial,segments,radius);
-            body_contact_predict(cfg,state,base,trial,trial_points);
+            body_contact_predict_geometry(cfg,state,base,trial,trial_points);
             trial_error=body_contact_overlap_error(trial_points,contacts,count);
             if(trial_error<error-1e-12f) {
                 memcpy(correction,trial,sizeof(trial));memcpy(points,trial_points,sizeof(points));
@@ -352,7 +367,7 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
             int axis=a?cfg->vertical_output_axis:cfg->horizontal_output_axis;
             free_delta[j][a]=state->collision_free_target[j][axis]-state->angle[j][axis];
         }
-        body_contact_predict(cfg,state,base,free_delta,free_points);
+        body_contact_predict_geometry(cfg,state,base,free_delta,free_points);
         memcpy(strength_contacts,contacts,(size_t)count*sizeof(*contacts));
         contacts=strength_contacts;
         for(c=0;c<count;c++) if(contacts[c].strength<1.0f) {
@@ -395,7 +410,7 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
                 if(physx_absf(next-before)>largest) largest=physx_absf(next-before);
             }
             body_contact_bound_correction(correction,segment_count,trust_radius);
-            body_contact_predict(cfg,state,base,correction,points);
+            body_contact_predict_geometry(cfg,state,base,correction,points);
             {
                 float error=body_contact_overlap_error(points,contacts,count),norm=0;
                 for(j=0;j<segment_count;j++) for(a=0;a<2;a++) norm+=correction[j][a]*correction[j][a];
@@ -422,7 +437,7 @@ static void body_contact_solve(const body_chain_physics_config_t *cfg,
        corner-support inequalities. */
     COLLISION_PROFILE_SCOPE(profile_velocity, CP_BODY_VELOCITY);
     memcpy(incoming_velocity,state->velocity,sizeof(incoming_velocity));
-    if(soft_count) body_contact_predict(cfg,state,base,correction,points);
+    if(soft_count) body_contact_predict_geometry(cfg,state,base,correction,points);
     for(pass=0;pass<8;pass++) for(c=0;c<count;c++) {
         float jac[3][2],denom=0,vn=0,lambda;
         if(contacts[c].strength<1.0f) {

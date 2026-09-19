@@ -476,6 +476,7 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
                 state->collision_free_velocity[side][axis] = 0.0f;
             }
         }
+        paired_body_seed_activation(state, cfg);
         butt_physics_capture_animation_rows(state);
     }
 
@@ -527,7 +528,8 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
             person, &state->motion, root_raw, root, now,
             &butt_physics_room_gravity_cache[person_index],
             "butt_physics");
-        if (state->motion.gravity_probe_promoted) {
+        if (state->motion.gravity_probe_promoted &&
+            state->motion.gravity_sample.trusted_valid) {
             const float *active_gravity;
             float relative_raw[3];
             update_body_chain_gravity_filter(&state->motion, dt);
@@ -578,6 +580,7 @@ static void run_butt_physics_for_person(int person_index, DWORD now)
             target[side][axis] = body_chain_clamp_link_axis_angle(
                 cfg, 0, axis, target[side][axis] * cfg->link_gain[0]);
         }
+        if (!side) paired_body_advance_activation(state, dt);
         paired_body_rotation_step(cfg, state->rotation[side],
             state->angular_velocity[side], target[side], dt);
     }

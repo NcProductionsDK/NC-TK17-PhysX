@@ -19,7 +19,8 @@ static void physx_wire_person_frame(physx_wire_batch *batch,
 static void physx_wire_body_edge(physx_wire_batch *batch,
     const body_chain_collider_person_state_t *state, int start, int end, DWORD color)
 {
-    if(!state->valid[start] || !state->valid[end]) return;
+    if(!state->valid[start] || !state->valid[end] ||
+       !body_collider_debug_edge_selected(start,end)) return;
     physx_wire_capsule(batch,state->local_position[start],state->local_position[end],
         body_chain_collider_visual_radius_for_node(start),
         body_chain_collider_visual_radius_for_node(end),color);
@@ -35,7 +36,8 @@ static void physx_wire_collect_body(physx_wire_batch *batch)
         physx_wire_person_frame(batch,state);
         for(i=0;i<BODY_COLLIDER_NODE_COUNT;++i) {
             float axes[3];
-            if(!state->valid[i] || i==BODY_COLLIDER_TESTICLES_MID) continue;
+            if(!state->valid[i] || i==BODY_COLLIDER_TESTICLES_MID ||
+               !body_collider_debug_node_selected(i)) continue;
             if(i>=BODY_COLLIDER_TESTICLES_01 && i<=BODY_COLLIDER_TESTICLES_02 &&
                 (!body_chain_collider_cfg.testicle_collision_enabled ||
                  physx_genitals_paused(person))) continue;
@@ -45,7 +47,8 @@ static void physx_wire_collect_body(physx_wire_batch *batch)
                 if(!state->stomach_points_ready) continue;
                 body_chain_collider_visual_stomach_radius_axes(i==BODY_COLLIDER_STOMACH_02,axes);
             } else {
-                if(i<=BODY_COLLIDER_TESTICLES_MID && i<BODY_COLLIDER_TESTICLES_01 &&
+                if(!body_collider_debug_custom_view() &&
+                   i<=BODY_COLLIDER_TESTICLES_MID && i<BODY_COLLIDER_TESTICLES_01 &&
                     !body_chain_collider_node_radius_is_oval(i)) continue;
                 body_chain_collider_visual_radius_axes_for_node(i,axes);
             }
@@ -61,7 +64,8 @@ static void physx_wire_collect_body(physx_wire_batch *batch)
         }
         if(body_chain_collider_cfg.testicle_collision_enabled && !physx_genitals_paused(person))
             physx_wire_body_edge(batch,state,BODY_COLLIDER_TESTICLES_01,BODY_COLLIDER_TESTICLES_02,0xffff40ff);
-        if(body_chain_collider_cfg.penis_collision_enabled && !physx_genitals_paused(person)) {
+        if(body_collider_debug_chain_selected() &&
+           body_chain_collider_cfg.penis_collision_enabled && !physx_genitals_paused(person)) {
             float points[4][3]; DWORD now=GetTickCount(); int ready=0,source=0;
             if(state->chain_points_ready && state->chain_points_update_tick &&
                 now-state->chain_points_update_tick<=BODY_CHAIN_ENGINE_POINT_STALE_MS) {
@@ -71,9 +75,10 @@ static void physx_wire_collect_body(physx_wire_batch *batch)
             } else if(chain->initialized) {
                 ready=body_chain_collision_points_local(state,chain,points,&source,now);
             }
+            if(ready) body_chain_penis_offset_points(points, 1.0f);
             if(ready) for(i=0;i<3;++i)
-                physx_wire_capsule(batch,points[i],points[i+1],body_chain_collider_cfg.chain_radius,
-                    body_chain_collider_cfg.chain_radius,0xffffa000);
+                physx_wire_capsule(batch,points[i],points[i+1],body_chain_penis_radius(),
+                    body_chain_penis_radius(),0xffffa000);
         }
     }
     body_profile_set_active_person_config(-1);

@@ -37,6 +37,7 @@ static char room_wind_observed_scene_key[MAX_PATH * 2];
 static char room_wind_observed_package_prefix[MAX_PATH * 2];
 static unsigned int room_wind_observation_generation = 1u;
 static unsigned int room_wind_applied_observation_generation;
+static int room_wind_observations_blocked;
 
 static char *room_wind_find_i(char *text, const char *needle)
 {
@@ -170,7 +171,8 @@ static void room_wind_observe_scene(const char *scene_key,
 {
     int scene_changed;
     int package_changed;
-    if (!scene_key || !scene_key[0]) return;
+    if (physx_shutting_down || room_wind_observations_blocked ||
+        !scene_key || !scene_key[0]) return;
     scene_changed = _stricmp(room_wind_observed_scene_key, scene_key) != 0;
     package_changed = package_prefix && package_prefix[0] &&
         _stricmp(room_wind_observed_package_prefix, package_prefix) != 0;

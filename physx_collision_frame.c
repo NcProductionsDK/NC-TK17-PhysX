@@ -8,11 +8,13 @@ static void body_collision_frame_update(body_chain_collider_person_state_t *stat
     float view[9], inverse[9], origin[3], candidate[12] = {0}, camera[9];
     float offset[3];
     int i, row, col, valid;
+    body_placement_cache_t *placement;
     LONG generation = InterlockedCompareExchange(&named_node_generation, 0, 0);
     DWORD age = captured_camera_change_tick ? now - captured_camera_change_tick : 0xffffffffu;
     state->contact_frame_valid = 0;
     make_body_runtime_name(name, sizeof(name), person, "TRS_group");
     raw = resolve_axis_map_raw(name);
+    placement = body_placement_cache_for(person, raw);
     valid = raw && body_chain_read_mat3_rows(raw, view) &&
         body_chain_mat3_inverse(view, inverse) &&
         body_collider_engine_pivot_view(person, "TRS_group", NULL, origin) &&
@@ -22,6 +24,14 @@ static void body_collision_frame_update(body_chain_collider_person_state_t *stat
             camera[row*3+col] = captured_camera_inverse[row*4+col];
         body_chain_mat3_multiply(view, camera, candidate);
         valid = camera_view_to_world_point(origin, candidate+9);
+    }
+    if (valid && placement && !state->contact_frame_sample.trusted_valid &&
+        placement->collision.trusted_valid) {
+        state->contact_frame_sample = placement->collision;
+        state->contact_frame_sample.pending_valid = 0;
+        state->contact_frame_sample.held = 1;
+        if (defaults_cfg.debug)
+            log_line("physics-environment placement-reuse person=\"%s\" system=collision note=\"same live body, generation and authored placement; contacts rebuilt from current bones\"", person);
     }
     if (!collision_frame_sample_update(&state->contact_frame_sample,
             (uintptr_t)raw, (uint32_t)generation, candidate, valid,
@@ -36,6 +46,8 @@ static void body_collision_frame_update(body_chain_collider_person_state_t *stat
         }
         return;
     }
+    if (placement && !state->contact_frame_sample.held)
+        placement->collision = state->contact_frame_sample;
     body_chain_mat3_multiply(inverse, state->contact_frame_sample.trusted,
                             state->contact_view_to_world);
     if (!body_chain_mat3_inverse(state->contact_view_to_world,

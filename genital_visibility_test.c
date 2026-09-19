@@ -159,6 +159,8 @@ static void test_resume_initial_output(void)
     body_chain_physics_cfg.root_offset=0x40;
     body_chain_physics_cfg.output_offset=0x40;
     body_chain_physics_cfg.zero_output_rest=1;
+    body_chain_physics_cfg.enabled=1;
+    body_chain_physics_cfg.enabled_person[0]=1;
     body_chain_physics_cfg.gravity_angle=12;
     body_chain_physics_cfg.stiffness=90;
     body_chain_physics_cfg.damping=18;
@@ -180,39 +182,50 @@ static void test_resume_initial_output(void)
     engine_FindObjC=test_find_resume_skeleton;
     /* Exercise the actual initialization and publication branch with a
        deterministic 12-degree force target and no native ownership writes. */
-    for (int resume=0;resume<2;++resume) {
+    for (int resume=0;resume<4;++resume) {
+        DWORD start=5000+resume*100;
+        float initial=resume==3 ? -70.0f : -8.0f;
         memset(state,0,sizeof(*state));
         memset(resume_skeleton,0,sizeof(resume_skeleton));
         *(float *)(resume_skeleton[0]+32+0x40)=1;
         for (int j=0;j<3;++j)
-            *(float *)(resume_skeleton[j+1]+32+0x40+sizeof(float))=-8;
-        state->clothing_resume_pending=resume;
-        run_body_chain_physics_for_person(0,5000+resume*100);
+            *(float *)(resume_skeleton[j+1]+32+0x40+sizeof(float))=initial;
+        state->clothing_resume_pending=resume==1;
+        poseedit_penis_resume_mask=resume>=2 ? 1u : 0u;
+        poseedit_penis_resume_editor=captured_poseedit_this;
+        run_body_chain_physics_for_person(0,start);
         assert(state->initialized);
         for (int j=0;j<3;++j) {
             float output=*(float *)(resume_skeleton[j+1]+32+0x40+sizeof(float));
-            assert(fabsf(output-(resume?-8.0f:0.0f))<0.0001f);
+            assert(fabsf(output-initial)<0.0001f);
+            assert(state->output_handoff_rest[j][1]==initial);
+            assert(state->velocity[j][1]==0);
         }
-        assert(state->clothing_resume_pending==resume);
-        if (resume) {
+        assert(state->clothing_resume_pending==(resume==1));
+        assert(state->pose_load_resume_pending==(resume>=2));
+        assert(!poseedit_penis_resume_mask);
+        {
             /* A pending gravity baseline must preserve the visible pose. */
             physics_environment_cfg.gravity_apply_to_body_chain=1;
             physics_environment_cfg.world_gravity_probe=1;
             physics_environment_cfg.gravity_probe_settle_ms=10000;
-            run_body_chain_physics_for_person(0,5116);
-            assert(state->clothing_resume_pending && state->clothing_resume_pose_valid);
+            run_body_chain_physics_for_person(0,start+16);
+            assert(state->activation_resume_pending && state->clothing_resume_pose_valid);
             for (int j=0;j<3;++j)
-                assert(fabsf(*(float *)(resume_skeleton[j+1]+32+0x44)+8)<0.0001f);
+                assert(fabsf(*(float *)(resume_skeleton[j+1]+32+0x44)-initial)<0.0001f);
             physics_environment_cfg.gravity_apply_to_body_chain=0;
             physics_environment_cfg.world_gravity_probe=0;
-            run_body_chain_physics_for_person(0,5132);
+            run_body_chain_physics_for_person(0,start+32);
             float output=*(float *)(resume_skeleton[1]+32+0x44);
-            assert(output>-8 && output<0); /* Moves naturally, not straight to +12. */
+            assert(output>initial && output<0); /* Moves naturally, not straight to +12. */
             assert(!state->clothing_resume_pending);
+            assert(!state->pose_load_resume_pending);
+            assert(!state->activation_resume_pending);
+            assert(state->output_handoff_rest[0][1]==initial);
         }
     }
     engine_FindObjC=NULL;
-    puts("PASS: real penis resume preserves the authored first output, holds it through gravity initialization, then springs toward the force pose; ordinary startup unchanged");
+    puts("PASS: activation/clothing/pose-load resume preserves incoming output and OFF snapshot, including outside-limit poses, holds through gravity initialization, then springs toward the force pose");
 }
 
 static void test_clothing_resume(void)

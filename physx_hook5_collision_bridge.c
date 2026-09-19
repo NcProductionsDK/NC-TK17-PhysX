@@ -7,7 +7,7 @@ static int physx_debug_registered;
 
 static int physx_collision_debug_enabled(void)
 {
-    return (body_chain_collider_cfg.enabled && body_chain_collider_cfg.debug_draw) ||
+    return body_collider_debug_any() ||
         addon_sidecar_collision_debug_any() || room_collision_debug_any();
 }
 
@@ -15,6 +15,7 @@ static void __cdecl physx_hook5_collision_composite(ID3D11DeviceContext *context
     ID3D11RenderTargetView *target, ID3D11DepthStencilView *depth,
     unsigned width, unsigned height)
 {
+    if (physx_shutting_down) return;
     ID3D11Device *device = NULL;
     static int success_logged, failure_logged;
     static DWORD failed_tick;

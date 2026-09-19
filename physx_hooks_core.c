@@ -1,3 +1,5 @@
+#include "physx_pose_track_transition.c"
+
 static int write_far_jump(BYTE *address, void *target)
 {
     BYTE bytes[7] = { 0xea, 0, 0, 0, 0, 0, 0 };
@@ -73,6 +75,7 @@ static void __stdcall hook_PoseEdit_InitTracks(void)
         __asm__ volatile ("movl %0, %%ecx" : : "r"(pe) : "ecx");
         real_PoseEdit_InitTracks();
     }
+    if (physx_shutting_down) return;
     log_poseedit_fixed_offsets(pe);
     if (pe && ptr_readable((BYTE*)pe + POSEEDIT_EDITPOSE_OFFSET, sizeof(void*))) {
         editpose = *(void**)((BYTE*)pe + POSEEDIT_EDITPOSE_OFFSET);
@@ -410,7 +413,7 @@ static void THISCALL hook_SSimpleTransform_RotationSet(
     physx_sidecar_t *sc = NULL;
     physx_chain_t *chain = NULL;
     physx_target_t *target = NULL;
-    if (body_chain_runtime_should_neutralize_penis_animation_write(
+    if (!physx_shutting_down && body_chain_runtime_should_neutralize_penis_animation_write(
             self, member_id, value)) {
         applied = neutral;
     }
@@ -459,10 +462,10 @@ static void THISCALL hook_SJoint_RotationAxisSet(
     physx_sidecar_t *sc = NULL;
     physx_chain_t *chain = NULL;
     physx_target_t *target = NULL;
-    if (body_chain_runtime_should_neutralize_penis_source_axis_write(
+    if (!physx_shutting_down && (body_chain_runtime_should_neutralize_penis_source_axis_write(
             self, member_id, value) ||
         body_chain_runtime_should_neutralize_penis_animation_write(
-            self, member_id, value)) {
+            self, member_id, value))) {
         applied = neutral;
     }
     if (addon_should_suppress_animation_write(
@@ -527,7 +530,7 @@ static void THISCALL hook_ConfigEditor_ParamChange(void *self,
                                                    DWORD event_arg)
 {
     char param_copy[96];
-    char value_copy[32];
+    char value_copy[MAX_PATH];
     const char *param_cstr = stringref_cstr_a(param_name);
     const char *value_cstr = stringref_cstr_a(string_value);
     int is_physx = param_cstr &&
@@ -691,6 +694,35 @@ static void body_chain_set_poseeditor_mode(int poseeditor,
              source ? source : "unknown");
 }
 
+/* Both panels belong to the actual Customizer interface. Photo mode also
+   sends PersonContext_Mode="Customizer", so that command alone is not proof. */
+static void physx_observe_customizer_visibility(int frame, int position,
+                                               int poseeditor, DWORD now)
+{
+    int active = frame > 0 && position > 0 && poseeditor == 0;
+    if (active && !physx_customizer_active) {
+        physx_customizer_entry_tick = now;
+        physx_customizer_entry_pending = 1;
+        log_line("physics Customizer entered source=\"Customizer panels + hidden PoseEditor root\" note=\"refresh bindings; retain transform and collision readiness checks\"");
+    }
+    if (!active && physx_customizer_active)
+        log_line("physics Customizer left panels=(%d,%d) poseeditor=%d note=\"visibility observation; native fade timing logged separately\"",
+            frame, position, poseeditor);
+    physx_customizer_active = active;
+    if (active) {
+        body_chain_set_poseeditor_mode(0, "Customizer interface", "Customizer");
+    }
+}
+
+static int physx_read_widget_visibility(const char *name)
+{
+    unsigned int visible;
+    void *widget = person_context_find_widget(name);
+    if (!widget || !person_context_widget_visibility_get(widget, &visible))
+        return -1;
+    return visible != 0;
+}
+
 static int body_chain_read_poseeditor_visibility(int *poseeditor_out)
 {
     static void *poseeditor_root;
@@ -725,6 +757,12 @@ static void body_chain_poll_poseeditor_mode(DWORD now)
         return;
     }
     body_chain_poseeditor_mode_probe_tick = now;
+
+    physx_observe_customizer_visibility(
+        physx_read_widget_visibility("GUI:Customizer_Frame"),
+        physx_read_widget_visibility("GUI:Customizer_Pos_Frame"),
+        physx_read_widget_visibility("GUI:PoseEdit_RootGroup"), now);
+    if (physx_customizer_active) return;
 
     if (!body_chain_read_poseeditor_visibility(&poseeditor)) {
         if (defaults_cfg.debug &&
@@ -772,6 +810,55 @@ static void body_chain_poll_poseeditor_mode(DWORD now)
         }
     } else {
         body_chain_poseeditor_exit_candidate_tick = 0;
+    }
+}
+
+/* WMenuItem inherits the native Label string property (SYS registration:
+   "Label", 0x03fff0eb). Use its setter and engine-owned strings so the menu
+   updates its text/layout through the normal GUI path. Only called on rebuild. */
+static int person_context_physx_label_at_base(void *widget, int enabled,
+                                              const char *kind, BYTE *base)
+{
+    typedef void (THISCALL *set_string_t)(void *, DWORD, const char *);
+    const DWORD label_id = 0x03fff0ebu;
+    engine_string_construct_cstr_t construct;
+    engine_string_release_t release;
+    set_string_t set;
+    char label[64], *value = NULL;
+    if (!base || !kind ||
+        !ptr_readable(base + PHYSX_ENGINE_STRING_CSTR_CONSTRUCT_RVA, sizeof(construct)) ||
+        !ptr_readable(base + PHYSX_ENGINE_STRING_RELEASE_RVA, sizeof(release))) return 0;
+    set = (set_string_t)physx_parameter_dispatch(widget, label_id, 4);
+    memcpy(&construct, base + PHYSX_ENGINE_STRING_CSTR_CONSTRUCT_RVA, sizeof(construct));
+    memcpy(&release, base + PHYSX_ENGINE_STRING_RELEASE_RVA, sizeof(release));
+    if (!set || !ptr_executable((void*)construct) || !ptr_executable((void*)release)) return 0;
+    snprintf(label, sizeof(label), "%s %s PhysX", enabled ? "Disable" : "Enable", kind);
+    construct(&value, label);
+    if (!value) return 0;
+    set(widget, label_id, value);
+    release(&value);
+    return 1;
+}
+
+/* TK17 can reuse the same context menu after toggling a setting. Refresh on
+   effective-config rebuild as well as menu rebuild; resolve live widgets and
+   never dereference the remembered context pointer from a previous scene. */
+static void person_context_refresh_physx_labels(void)
+{
+    int person = (int)InterlockedCompareExchange(&person_context_selected_person, 0, 0);
+    if (physx_shutting_down || person < 1 || person > 4) return;
+    int p = person - 1;
+    const char *names[] = { "GUI:PersonContext_PhysX_Breasts_Toggle",
+        "GUI:PersonContext_PhysX_Penis_Toggle", "GUI:PersonContext_PhysX_Testicle_Toggle",
+        "GUI:PersonContext_PhysX_Butt_Toggle" };
+    const char *kinds[] = { "Breast", "Penis", "Testicle", "Butt" };
+    const body_chain_physics_config_t *cfg[] = { &breasts_physics_person_cfg[p],
+        &body_chain_physics_person_cfg[p], &testicle_physics_person_cfg[p], &butt_physics_person_cfg[p] };
+    BYTE *base = (BYTE*)GetModuleHandleA(NULL);
+    for (int i=0; i<4; ++i) {
+        if (!cfg[i]->enabled) continue;
+        void *widget = person_context_find_widget(names[i]);
+        if (widget) person_context_physx_label_at_base(widget, cfg[i]->enabled_person[p], kinds[i], base);
     }
 }
 
@@ -898,6 +985,22 @@ static void person_context_sync_physx_menu(void *context)
         (desired_breasts_visibility || desired_penis_visibility ||
          desired_testicle_visibility || desired_butt_visibility) ? 1u : 0u;
     desired_menu_visibility = desired_separator_visibility;
+
+    if (context_visibility) {
+        BYTE *base = (BYTE*)GetModuleHandleA(NULL);
+        if (desired_breasts_visibility)
+            person_context_physx_label_at_base(breasts_widget,
+                breasts_physics_person_cfg[person_index].enabled_person[person_index], "Breast", base);
+        if (desired_penis_visibility)
+            person_context_physx_label_at_base(penis_widget,
+                body_chain_physics_person_cfg[person_index].enabled_person[person_index], "Penis", base);
+        if (desired_testicle_visibility)
+            person_context_physx_label_at_base(testicle_widget,
+                testicle_physics_person_cfg[person_index].enabled_person[person_index], "Testicle", base);
+        if (desired_butt_visibility)
+            person_context_physx_label_at_base(butt_widget,
+                butt_physics_person_cfg[person_index].enabled_person[person_index], "Butt", base);
+    }
 
     old_person = (int)InterlockedExchange(
         &person_context_selected_person,
@@ -1125,6 +1228,15 @@ static int app_main_command_string_arg(void *command_args,
                                        char *out,
                                        size_t outsz)
 {
+    /* Native Hash32 caches at text-0x14; size at text-4 includes the NUL.
+       A buffer with only a character count is not a native StringRef. */
+    struct {
+        DWORD hash;
+        DWORD reserved[3];
+        DWORD size;
+        char text[128];
+    } field_string = {0};
+    size_t field_length;
     const void *field_ref;
     unsigned int field_hash;
     void *field_value;
@@ -1135,8 +1247,11 @@ static int app_main_command_string_arg(void *command_args,
         !engine_NameHashFind) {
         return 0;
     }
-    field_ref = stringref_from_cstr_a(field_name);
-    if (!field_ref) return 0;
+    field_length = strlen(field_name);
+    if (field_length >= sizeof(field_string.text)) return 0;
+    field_string.size = (DWORD)field_length + 1u;
+    memcpy(field_string.text, field_name, field_length + 1u);
+    field_ref = field_string.text;
     field_hash = engine_StringRefHash32(field_ref);
     field_value = engine_NameHashFind(command_args, field_hash, field_ref);
     if (!field_value || !ptr_readable(field_value, sizeof(char*))) {
@@ -1148,12 +1263,39 @@ static int app_main_command_string_arg(void *command_args,
     return out[0] != 0;
 }
 
+#include "physx_customizer_transition.c"
+#include "physx_scene_lifecycle.c"
+
 static DWORD __cdecl hook_AppMain_Command(void *command_args)
 {
+    /* Native command handlers may load a scene or re-enter the solver.
+       Resume miss reuse only at the next ordinary physics update. */
+    runtime_exact_lookup_end();
+    runtime_exact_lookup_invalidate();
     char command_name[64];
+    char pose_exec[64];
 
     if (app_main_command_name(command_args, command_name,
                               sizeof(command_name))) {
+        physx_scene_lifecycle_command(command_name);
+        if (physx_shutting_down)
+            return real_AppMain_Command ? real_AppMain_Command(command_args) : 0x80000001u;
+        if (physx_customizer_defer_entry(command_name,command_args,GetTickCount())) return 0;
+        if (real_AppMain_Command && !strcmp(command_name, "PoseEdit")) {
+            if (app_main_command_string_arg(command_args, "Exec", pose_exec,
+                                            sizeof(pose_exec))) {
+                if (physx_poseedit_replaces_pose(pose_exec)) {
+                    log_line("PoseEdit file handoff dispatch exec=\"%s\" poseedit=%p editpose=%p", pose_exec, captured_poseedit_this, captured_poseedit_editpose);
+                    return physx_poseedit_execute_file_command(command_args, pose_exec);
+                }
+            } else {
+                static int decode_failure_logged;
+                if (!decode_failure_logged) {
+                    decode_failure_logged = 1;
+                    log_line("PoseEdit file handoff decode failed field=Exec note=\"native command passes through unchanged\"");
+                }
+            }
+        }
         if (strcmp(command_name, "PersonContext_Mode") == 0) {
             char mode_name[32];
             if (app_main_command_string_arg(command_args, "Mode",
@@ -1260,6 +1402,7 @@ static void THISCALL hook_Object_iNameSet(void *self,
                                           const void *member,
                                           const void *name_ref)
 {
+    runtime_exact_lookup_invalidate();
     char name_copy[128];
     char room_name_copy[MAX_PATH * 2];
     static int addon_object_name_log_count;
@@ -1279,6 +1422,7 @@ static void THISCALL hook_Object_iNameSet(void *self,
     if (tramp_Object_iNameSet) {
         tramp_Object_iNameSet(self, member, name_ref);
     }
+    runtime_exact_lookup_invalidate();
 
     if (room_name_copy[0]) {
         physx_note_room_object_name_a(room_name_copy);
@@ -1345,21 +1489,25 @@ static void note_addon_clone_name(const void *source, void *clone,
 
 static void *__cdecl hook_CloneObject(const void *source)
 {
+    runtime_exact_lookup_invalidate();
     void *clone = NULL;
     if (tramp_CloneObject) {
         clone = tramp_CloneObject(source);
     }
     note_addon_clone_name(source, clone, "CloneObject");
+    runtime_exact_lookup_invalidate();
     return clone;
 }
 
 static void *__cdecl hook_CloneNode(void *source, void *clone_map)
 {
+    runtime_exact_lookup_invalidate();
     void *clone = NULL;
     if (tramp_CloneNode) {
         clone = tramp_CloneNode(source, clone_map);
     }
     note_addon_clone_name(source, clone, "CloneNode");
+    runtime_exact_lookup_invalidate();
     return clone;
 }
 
@@ -1392,7 +1540,7 @@ static DWORD THISCALL hook_AppBase_ProcessAnimation(void *self)
        BlendControl values inside ProcessAnimation.  Consumer overlays must
        therefore exist before that evaluation; the post-call application is
        retained because ordinary runtime animation may write the controls. */
-    if (body_chain_runtime_mode_active())
+    if (!physx_shutting_down && body_chain_runtime_mode_active())
         physx_prepare_genital_reveal("AppBase-pre-animation");
     physx_public_run_post_animation_callbacks();
     if (physx_public_has_post_animation_callbacks() &&
@@ -1428,7 +1576,7 @@ static void THISCALL hook_PoseEdit_UpdateObjectsFromTracks(void *self)
     DWORD now = GetTickCount();
     if (tramp_PoseEdit_UpdateObjectsFromTracks)
         tramp_PoseEdit_UpdateObjectsFromTracks(self);
-    if (!body_chain_runtime_mode_active())
+    if (!physx_shutting_down && !body_chain_runtime_mode_active())
         physx_prepare_genital_reveal("PoseEdit-post-tracks");
     physx_public_run_post_animation_callbacks();
     if (physx_public_has_post_animation_callbacks() &&
@@ -1461,6 +1609,8 @@ static void THISCALL hook_RuntimeRotationVectorWrite(
     physx_sidecar_t *addon_sc = NULL;
     physx_chain_t *addon_chain = NULL;
     physx_target_t *addon_target = NULL;
+
+    if (physx_shutting_down) goto native_rotation_write;
 
     if (self && value &&
         InterlockedCompareExchange(
@@ -1548,6 +1698,7 @@ static void THISCALL hook_RuntimeRotationVectorWrite(
             SCRIPT_PROPERTY_SSIMPLE_ROTATION, self);
     }
 
+native_rotation_write:
     if (tramp_RuntimeRotationVectorWrite) {
         tramp_RuntimeRotationVectorWrite(self, applied);
     } else if (real_RuntimeRotationVectorWrite &&

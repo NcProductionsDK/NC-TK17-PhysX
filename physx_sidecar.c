@@ -1244,6 +1244,7 @@ static void addon_effective_parent_runtime_cache_clear(physx_chain_t *chain)
     chain->addon_gravity_trusted_drive[2] = 0.0f;
     chain->addon_gravity_trusted_valid = 0;
     memset(&chain->addon_gravity_sample,0,sizeof(chain->addon_gravity_sample));
+    memset(&chain->addon_gravity_reference_sample,0,sizeof(chain->addon_gravity_reference_sample));
     chain->addon_gravity_camera_hold_active = 0;
     chain->addon_gravity_camera_release_active = 0;
     chain->addon_gravity_camera_log_tick = 0;
@@ -1606,10 +1607,34 @@ static int addon_chain_camera_safe_gravity_drive(physx_chain_t *chain,
     return 1;
 }
 
+/* Learn room-down in the person's placement frame only from quiet-camera
+   samples. During camera motion keep that reference, but continue sampling
+   parent * inverse(TRS_group): the common view transform cancels out. This
+   lets head/body animation change gravity without trusting a camera matrix
+   published at a different traversal point. Keeping the learned reference
+   (rather than assuming TRS_group is world identity) preserves pose placement. */
+static int addon_chain_relative_gravity_drive(physx_chain_t *chain,
+    const void *parent_raw, const void *trs_raw,
+    const float parent_matrix[9], const float trs_matrix[9],
+    const float gravity_view[3], DWORD now, float out[3])
+{
+    float trusted[3] = {0};
+    int available = gravity_sample_relative(&chain->addon_gravity_sample,
+        &chain->addon_gravity_reference_sample, parent_raw, trs_raw,
+        parent_matrix, trs_matrix, gravity_view, now, trusted);
+    if (available < 0) return 0;
+    chain->addon_gravity_camera_hold_active = !chain->addon_gravity_sample.accepted;
+    chain->addon_gravity_camera_release_active = 0;
+    chain->addon_gravity_trusted_valid = available;
+    if (available)
+        memcpy(chain->addon_gravity_trusted_drive, trusted, sizeof(trusted));
+    memcpy(out, trusted, sizeof(trusted));
+    return 1;
+}
+
 static int addon_chain_parent_gravity_drive(physx_sidecar_t *sc,
                                             physx_chain_t *chain,
                                             DWORD now,
-                                            int camera_safe_parent_rotation,
                                             float out[3])
 {
     physx_target_t *parent;
@@ -1620,7 +1645,8 @@ static int addon_chain_parent_gravity_drive(physx_sidecar_t *sc,
     float gravity_world[3] = { 0.0f, -1.0f, 0.0f };
     float gravity_view[3];
     float parent_matrix[9];
-    (void)camera_safe_parent_rotation;
+    float trs_matrix[9];
+    void *trs_raw;
     if (!out) return 0;
     out[0] = 0.0f;
     out[1] = 0.0f;
@@ -1668,9 +1694,17 @@ static int addon_chain_parent_gravity_drive(physx_sidecar_t *sc,
         !camera_world_to_view_direction(gravity_world, gravity_view)) {
         return addon_chain_camera_safe_gravity_drive(chain,now,NULL,0,parent_raw,out);
     }
-    /* Gravity and wind must be expressed through the same live model-view
-       parent basis. Removing TRS_group here made gravity body-relative while
-       wind remained room-relative, so their sum changed with pose placement. */
+    trs_raw = addon_parent_camera_relative_trs_raw(chain, person, now);
+    if (trs_raw && body_chain_read_mat3_rows(trs_raw, trs_matrix) &&
+        addon_chain_relative_gravity_drive(chain, parent_raw, trs_raw,
+            parent_matrix, trs_matrix, gravity_view, now, out)) {
+        addon_chain_note_body_root_person(chain, person, now,
+                                          "camera-relative-parent-gravity");
+        return 1;
+    }
+    /* Unresolved or invalid placement basis: retain the conservative live
+       model-view path, including its camera quiet-time checks. */
+    chain->addon_gravity_reference_sample.pending_valid = 0;
     addon_chain_project_direction_basis(gravity_view, parent_matrix, out);
     if (!addon_chain_camera_safe_gravity_drive(
             chain, now, out, physx_vec3_sane_limit(out, 4.0f), parent_raw, out)) {
@@ -1687,7 +1721,6 @@ static int addon_chain_parent_gravity_drive(physx_sidecar_t *sc,
 static int addon_chain_body_gravity_drive(physx_sidecar_t *sc,
                                           physx_chain_t *chain,
                                           DWORD now,
-                                          int camera_safe_parent_rotation,
                                           float out[3])
 {
     body_chain_person_state_t *state = NULL;
@@ -1703,7 +1736,7 @@ static int addon_chain_body_gravity_drive(physx_sidecar_t *sc,
         return 0;
     }
     if (addon_chain_parent_gravity_drive(
-            sc, chain, now, camera_safe_parent_rotation, out)) {
+            sc, chain, now, out)) {
         return 1;
     }
     if (!addon_parent_camera_relative_person(sc, chain, NULL,
@@ -7454,6 +7487,7 @@ static int physx_addon_publish_visual_pose(physx_target_t *target,
 
 static int physx_addon_apply_traverse_overlay(void *object, int allow_global)
 {
+    if (physx_shutting_down) return 0;
     int i, c, t;
     int applied = 0;
     static int log_count;
@@ -9798,6 +9832,7 @@ static void addon_target_note_resolve_miss(physx_target_t *target,
     } else {
         delay_ms = 15000u;
     }
+    if (physx_customizer_startup_active(now)) delay_ms = 100u;
     target->addon_resolve_retry_tick = now + delay_ms;
     if (!target->addon_resolve_backoff_logged &&
         target->addon_resolve_miss_count >= 4) {
@@ -9825,6 +9860,9 @@ static void addon_chain_reset_runtime_state(physx_chain_t *chain)
 {
     int t;
     if (!chain) return;
+    chain->customizer_ready_samples = 0;
+    chain->customizer_sample_tick = 0;
+    chain->customizer_owner_raw = NULL;
     chain->anchor_raw_object = NULL;
     chain->anchor_object = NULL;
     chain->anchor_vector = NULL;
@@ -9892,6 +9930,7 @@ static void addon_chain_reset_runtime_state(physx_chain_t *chain)
     chain->addon_gravity_trusted_drive[2] = 0.0f;
     chain->addon_gravity_trusted_valid = 0;
     memset(&chain->addon_gravity_sample,0,sizeof(chain->addon_gravity_sample));
+    memset(&chain->addon_gravity_reference_sample,0,sizeof(chain->addon_gravity_reference_sample));
     chain->addon_gravity_camera_hold_active = 0;
     chain->addon_gravity_camera_release_active = 0;
     chain->addon_gravity_camera_log_tick = 0;
@@ -10525,7 +10564,8 @@ static void addon_chain_note_live_root_event(physx_sidecar_t *sc,
 static void update_targets(DWORD now)
 {
     int i, c, t;
-    if (last_update_tick && now - last_update_tick < 1000) return;
+    DWORD interval = physx_customizer_startup_active(now) ? 100u : 1000u;
+    if (last_update_tick && now - last_update_tick < interval) return;
     last_update_tick = now;
     resolve_engine_symbols();
     if (!engine_FindObjC) return;
@@ -10577,7 +10617,9 @@ static void update_targets(DWORD now)
             }
             if (chain->addon_chain && !sc->room_scene_sidecar) {
                 addon_chain_note_live_root_event(sc, chain, now);
-                if (addon_chain_settling(chain, now)) continue;
+                /* Discovery is read-only. Output remains gated separately. */
+                if (addon_chain_settling(chain, now) &&
+                    !physx_customizer_startup_active(now)) continue;
             }
             for (t = 0; t < chain->target_count; t++) {
                 physx_target_t *target = &chain->targets[t];
@@ -11144,6 +11186,7 @@ static int addon_constraint_target_owned(
     const physx_chain_t *chain,
     const physx_target_t *target)
 {
+    if (physx_shutting_down) return 0;
     if (!sc || !chain || !target ||
         !sc->loaded || !sc->enabled || sc->write_test ||
         !chain->addon_chain || !chain->simulate ||
@@ -11316,6 +11359,7 @@ static int addon_animation_target_owned(
     const physx_chain_t *chain,
     const physx_target_t *target)
 {
+    if (physx_shutting_down) return 0;
     if (!sc || !chain || !target ||
         !sc->loaded || !sc->enabled || sc->write_test ||
         !sc->room_scene_sidecar ||
@@ -11841,6 +11885,8 @@ static int addon_chain_scene_visible(physx_sidecar_t *sc,
     if (runtime_fallback_out) *runtime_fallback_out = 1;
     return 1;
 }
+
+#include "physx_customizer.c"
 
 static void run_addon_visual_swing_test(physx_sidecar_t *sc,
                                         physx_chain_t *chain,
@@ -13801,6 +13847,7 @@ static int addon_chain_apply_body_collision(
     if (!chain || !target || !start ||
         chain_frame_person_index < 0 || chain_frame_person_index >= 4 ||
         collider_person_index < 0 || collider_person_index >= 4 ||
+        !body_collision_person_allowed(chain_frame_person_index, collider_person_index) ||
         !(chain->collision_scope &
           (PHYSX_COLLISION_SCOPE_BODY | PHYSX_COLLISION_SCOPE_BODY_ALL)) ||
         chain->collision_radius <= 0.0f) {
@@ -14298,6 +14345,7 @@ static int addon_chain_apply_body_point_collision(
     if (!chain || !target || !point ||
         chain_frame_person_index < 0 || chain_frame_person_index >= 4 ||
         collider_person_index < 0 || collider_person_index >= 4 ||
+        !body_collision_person_allowed(chain_frame_person_index, collider_person_index) ||
         !(chain->collision_scope &
           (PHYSX_COLLISION_SCOPE_BODY | PHYSX_COLLISION_SCOPE_BODY_ALL)) ||
         chain->collision_radius <= 0.0f) {
@@ -15961,7 +16009,6 @@ static void run_chain_simulations(DWORD now)
             float addon_world_wind_drive[3] = { 0.0f, 0.0f, 0.0f };
             int addon_world_wind_valid = 0;
             int addon_world_wind_sampled = 0;
-            int addon_gravity_parent_rotation_camera_safe = 0;
             float addon_collision_points[32][3];
             int addon_collision_point_valid[32];
             int addon_collision_body_person_ready[4];
@@ -16025,6 +16072,7 @@ static void run_chain_simulations(DWORD now)
                                  sc->path);
                     }
                 }
+                addon_customizer_try_finish_settle(sc, chain, now);
                 if (addon_chain_settling(chain, now)) {
                     physx_perf_add(PHYSX_PERF_ADDON_ACTIVATION,
                                    addon_activation_start);
@@ -16109,7 +16157,9 @@ static void run_chain_simulations(DWORD now)
                                  collider_person_index < 4;
                                  collider_person_index++) {
                                 if (collider_person_index ==
-                                    addon_collision_person_index) {
+                                    addon_collision_person_index ||
+                                    !body_collision_person_allowed(
+                                        addon_collision_person_index, collider_person_index)) {
                                     continue;
                                 }
                                 if (addon_chain_body_collider_person_ready(
@@ -16255,9 +16305,6 @@ static void run_chain_simulations(DWORD now)
                         physx_perf_add(PHYSX_PERF_ADDON_PARENT_ROTATION,
                                        addon_parent_rotation_start);
                     }
-                    addon_gravity_parent_rotation_camera_safe =
-                        addon_parent_rotation_drive &&
-                        chain->addon_parent_rotation_camera_relative;
                     if (addon_root_drive_untrusted) {
                         if (addon_parent_translation_drive &&
                             !addon_parent_translation_camera_safe) {
@@ -16324,7 +16371,6 @@ static void run_chain_simulations(DWORD now)
                     addon_world_gravity_valid =
                         addon_chain_body_gravity_drive(
                             sc, chain, now,
-                            addon_gravity_parent_rotation_camera_safe,
                             addon_world_gravity_drive);
                     physx_perf_add(PHYSX_PERF_ADDON_GRAVITY,
                                    addon_gravity_start);

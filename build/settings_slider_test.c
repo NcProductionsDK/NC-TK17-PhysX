@@ -20,6 +20,11 @@ static int ptr_readable(const void *p,size_t n){(void)n;return p!=NULL;}
 static int ptr_executable(const void *p){return p!=NULL;}
 static void log_line(const char *fmt,...){(void)fmt;}
 static void config_file_path(char *p,size_t n){(void)p;(void)n;assert(0);}
+static const char *physx_settings_write_path(const char *section){(void)section;return config_path;}
+static void *physx_settings_customizer;
+static void physx_sync_controls(void *self);
+static int physx_preset_select(const char *name){(void)name;assert(0);return 0;}
+static void physx_preset_prepare_controls(void *self){(void)self;}
 static const char *stringref_cstr_a(const char *p){return p;}
 static void migrate_legacy_penis_physics_section(void){}
 static void physx_mark_penis_physics_setting_change(const char *k,int v){(void)k;(void)v;}
@@ -37,6 +42,7 @@ typedef struct physx_settings_binding_t {
     const char *key;
     void *slider_widget;
 } physx_settings_binding_t;static physx_settings_binding_t physx_settings_bindings[] = {
+    { "NCPhysXPresets", "presets", "selected", NULL },
     { "NCPhysXBreastsPhysics", BREASTS_PHYSICS_CONFIG_SECTION, "enabled", NULL },
     { "NCPhysXPenisPhysics", PENIS_PHYSICS_CONFIG_SECTION, "enabled", NULL },
     { "NCPhysXTesticlePhysics", TESTICLE_PHYSICS_CONFIG_SECTION, "enabled", NULL },
@@ -62,7 +68,11 @@ typedef struct physx_settings_binding_t {
     { "NCPhysXPenisCollisionStrength", PENIS_PHYSICS_CONFIG_SECTION, "collision_strength", NULL },
     { "NCPhysXTesticleCollisionStrength", TESTICLE_PHYSICS_CONFIG_SECTION, "collision_strength", NULL },
     { "NCPhysXButtCollisionStrength", BUTT_PHYSICS_CONFIG_SECTION, "collision_strength", NULL }
-};static physx_settings_binding_t *physx_settings_binding_by_name(
+};
+static int physx_sync_box_from_ini(void *self,int index,void *record,const physx_settings_binding_t *binding){
+ (void)self;(void)index;(void)record;(void)binding;return 0;
+}
+static physx_settings_binding_t *physx_settings_binding_by_name(
     const char *name)
 {
     size_t i;
@@ -189,7 +199,7 @@ static void physx_write_slider_value(const physx_settings_binding_t *binding, fl
         physx_sync_slider_from_ini(binding, binding->slider_widget);
         return;
     }
-    if (WritePrivateProfileStringA(binding->section, binding->key, normalized, config_path)) {
+    if (WritePrivateProfileStringA(binding->section, binding->key, normalized, physx_settings_write_path(binding->section))) {
         log_line("settings slider saved param=\"%s\" value=%s ini=[%s] %s note=\"normal INI hot-reload scheduled\"",
                  binding->param_name, normalized, binding->section, binding->key);
         physx_sync_slider_from_ini(binding, binding->slider_widget);
@@ -222,6 +232,10 @@ static void handle_physx_settings_change(const char *param_ref,
     if (physx_settings_sync_depth || !param_name || _strnicmp(param_name, "NCPhysX", 7) != 0) return;
     if (!config_path[0]) config_file_path(config_path, sizeof(config_path));
     migrate_legacy_penis_physics_section();
+    if (!strcmp(param_name, "NCPhysXPresets")) {
+        if (physx_preset_select(string_value)) physx_sync_controls(physx_settings_customizer);
+        return;
+    }
     for (i = 0; i < sizeof(physx_settings_bindings) / sizeof(physx_settings_bindings[0]); i++) {
         const physx_settings_binding_t *binding = &physx_settings_bindings[i];
         if (strcmp(param_name, binding->param_name) != 0) continue;
@@ -237,7 +251,7 @@ static void handle_physx_settings_change(const char *param_ref,
                 return;
             }
             if (WritePrivateProfileStringA(binding->section, binding->key,
-                                           collision_scope, config_path)) {
+                                           collision_scope, physx_settings_write_path(binding->section))) {
                 log_line("settings changed param=\"%s\" value=%s ini=[%s] %s note=\"normal INI hot-reload scheduled\"",
                          param_name, collision_scope,
                          binding->section, binding->key);
@@ -254,7 +268,7 @@ static void handle_physx_settings_change(const char *param_ref,
         }
         if (WritePrivateProfileStringA(binding->section, binding->key,
                                        enabled ? "true" : "false",
-                                       config_path)) {
+                                       physx_settings_write_path(binding->section))) {
             if (strcmp(binding->section, PENIS_PHYSICS_CONFIG_SECTION) == 0) {
                 physx_mark_penis_physics_setting_change(binding->key, enabled);
             } else if (strcmp(binding->section,
@@ -288,38 +302,34 @@ static int original_build(void *self,void *a,void *b,void *c){
  return 42;
 }
 static int (*real_Customizer_BuildControls)(void *,void *,void *,void *)=original_build;
-static int physx_build_controls_and_sync(
-    void *self, void *arg1, void *arg2, void *arg3)
+static void physx_sync_controls(void *self)
 {
-    int result;
     void **parameters = NULL;
     void **records = NULL;
     int parameter_count = 0;
     int record_count = 0;
     int count;
     int index;
-    result = real_Customizer_BuildControls ?
-        real_Customizer_BuildControls(self, arg1, arg2, arg3) : 0;
     if (!self ||
         !ptr_readable((BYTE*)self + 0x14, sizeof(parameters)) ||
-        !ptr_readable((BYTE*)self + 0x18, sizeof(records))) return result;
+        !ptr_readable((BYTE*)self + 0x18, sizeof(records))) return;
     memcpy(&parameters, (BYTE*)self + 0x14, sizeof(parameters));
     memcpy(&records, (BYTE*)self + 0x18, sizeof(records));
     if (!parameters || !records ||
         !ptr_readable((BYTE*)parameters - sizeof(parameter_count),
                       sizeof(parameter_count)) ||
         !ptr_readable((BYTE*)records - sizeof(record_count),
-                      sizeof(record_count))) return result;
+                      sizeof(record_count))) return;
     memcpy(&parameter_count,
            (BYTE*)parameters - sizeof(parameter_count),
            sizeof(parameter_count));
     memcpy(&record_count, (BYTE*)records - sizeof(record_count),
            sizeof(record_count));
     if (parameter_count <= 0 || record_count <= 0 ||
-        parameter_count > 4096 || record_count > 4096) return result;
+        parameter_count > 4096 || record_count > 4096) return;
     count = parameter_count < record_count ? parameter_count : record_count;
     if (!ptr_readable(parameters, (size_t)count * sizeof(*parameters)) ||
-        !ptr_readable(records, (size_t)count * sizeof(*records))) return result;
+        !ptr_readable(records, (size_t)count * sizeof(*records))) return;
     for (index = 0; index < count; index++) {
         char parameter_name[128];
         void *record = records[index];
@@ -329,9 +339,11 @@ static int physx_build_controls_and_sync(
             !physx_custom_parameter_name(parameters[index], parameter_name,
                                          sizeof(parameter_name))) continue;
         binding = physx_settings_binding_by_name(parameter_name);
+        if (binding && strcmp(binding->key, "collision_strength") &&
+            physx_sync_box_from_ini(self, index, record, binding)) continue;
         if (binding && strcmp(binding->key, "collision_strength") == 0) {
             /* Main slider is record+0x04; preset slots start at +0x08 and
-               must retain their own preset values. Spinboxes use +0x24. */
+               must retain their own preset values. Boxes use +0x18; text fields use +0x24. */
             if (ptr_readable((BYTE*)record + 0x04, sizeof(widget))) {
                 memcpy(&widget, (BYTE*)record + 0x04, sizeof(widget));
                 binding->slider_widget = widget;
@@ -344,6 +356,16 @@ static int physx_build_controls_and_sync(
         memcpy(&widget, (BYTE*)record + 0x24, sizeof(widget));
         if (widget) physx_sync_spinbox_from_ini(binding, widget);
     }
+}
+static int physx_build_controls_and_sync(
+    void *self, void *arg1, void *arg2, void *arg3)
+{
+    int result;
+    physx_preset_prepare_controls(self);
+    result = real_Customizer_BuildControls ?
+        real_Customizer_BuildControls(self, arg1, arg2, arg3) : 0;
+    physx_settings_customizer = self;
+    physx_sync_controls(self);
     return result;
 }
 static int THISCALL hook_Customizer_BuildControls_PhysX(
@@ -388,7 +410,7 @@ static void THISCALL hook_ConfigEditor_ParamChange(void *self,
                                                    DWORD event_arg)
 {
     char param_copy[96];
-    char value_copy[32];
+    char value_copy[MAX_PATH];
     const char *param_cstr = stringref_cstr_a(param_name);
     const char *value_cstr = stringref_cstr_a(string_value);
     int is_physx = param_cstr &&
@@ -433,6 +455,7 @@ static void __cdecl hook_PhysX_ConfigEditorCallback(
     const char *name = stringref_cstr_a(parameter);
     const physx_settings_binding_t *binding = physx_settings_binding_by_name(name);
     int is_strength = binding && strcmp(binding->key, "collision_strength") == 0;
+    int is_preset = name && !strcmp(name, "NCPhysXPresets");
     int was_syncing = physx_settings_sync_depth != 0;
     int captured = 0;
     float value = 0;
@@ -447,6 +470,8 @@ static void __cdecl hook_PhysX_ConfigEditorCallback(
     if (real_PhysX_ConfigEditorCallback)
         real_PhysX_ConfigEditorCallback(self, parameter, text, value_arg, numeric_value);
     if (is_strength) physx_settings_sync_depth--;
+    if (is_preset && !was_syncing)
+        physx_sync_controls(physx_settings_customizer);
     if (captured) {
         physx_write_slider_value(binding, value);
     } else if (is_strength && !was_syncing) {

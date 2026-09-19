@@ -77,7 +77,7 @@ static void *physx_genital_visibility_object(int person)
     char name[192];
     void *raw=NULL, *object;
     if(person<0 || person>=BODY_PROFILE_PERSON_COUNT) return NULL;
-    /* Same namespace used by body_profile_runtime_signature_exists_a. */
+    /* Live body nodes are scoped to their owning person's namespace. */
     _snprintf(name,sizeof(name),"Person%02dBody:body_subdiv_cageShape__body_genital01_SG",
         person+1);
     name[sizeof(name)-1]=0;
@@ -184,7 +184,8 @@ static void physx_prepare_genital_reveal(const char *phase)
     unsigned int persons[2], all;
     DWORD now;
     int i, chain, scope[4] = {0};
-    if (!physx_pause_hidden_genitals || !engine_FindObjC || !physx_simulation_serial ||
+    if (physx_poseedit_transition_busy() ||
+        !physx_pause_hidden_genitals || !engine_FindObjC || !physx_simulation_serial ||
         physx_genital_early_sample_done ||
         InterlockedCompareExchange(&body_chain_runtime_mode_transition_pending, 0, 0)) return;
     if (InterlockedCompareExchange(&physx_physics_phase_busy, 1, 0)) return;

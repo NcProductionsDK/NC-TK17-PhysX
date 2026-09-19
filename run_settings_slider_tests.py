@@ -38,6 +38,11 @@ static int ptr_readable(const void *p,size_t n){(void)n;return p!=NULL;}
 static int ptr_executable(const void *p){return p!=NULL;}
 static void log_line(const char *fmt,...){(void)fmt;}
 static void config_file_path(char *p,size_t n){(void)p;(void)n;assert(0);}
+static const char *physx_settings_write_path(const char *section){(void)section;return config_path;}
+static void *physx_settings_customizer;
+static void physx_sync_controls(void *self);
+static int physx_preset_select(const char *name){(void)name;assert(0);return 0;}
+static void physx_preset_prepare_controls(void *self){(void)self;}
 static const char *stringref_cstr_a(const char *p){return p;}
 static void migrate_legacy_penis_physics_section(void){}
 static void physx_mark_penis_physics_setting_change(const char *k,int v){(void)k;(void)v;}
@@ -52,6 +57,11 @@ for name in ['BREASTS_PHYSICS_CONFIG_SECTION', 'PENIS_PHYSICS_CONFIG_SECTION',
 source += config[:config.index('} physx_settings_binding_t;') + len('} physx_settings_binding_t;')]
 start = config.index('static physx_settings_binding_t physx_settings_bindings[]')
 source += config[start:config.index('\n};', start) + 3]
+source += '''
+static int physx_sync_box_from_ini(void *self,int index,void *record,const physx_settings_binding_t *binding){
+ (void)self;(void)index;(void)record;(void)binding;return 0;
+}
+'''
 for name in ['physx_settings_binding_by_name', 'physx_settings_bool_value',
              'physx_settings_collision_scope_value', 'profile_collision_strength',
              'physx_slider_widget_value', 'physx_slider_widget_set_value',
@@ -71,7 +81,7 @@ static int original_build(void *self,void *a,void *b,void *c){
 }
 static int (*real_Customizer_BuildControls)(void *,void *,void *,void *)=original_build;
 '''
-source += function('physx_build_controls_and_sync') + function('hook_Customizer_BuildControls_PhysX')
+source += function('physx_sync_controls') + function('physx_build_controls_and_sync') + function('hook_Customizer_BuildControls_PhysX')
 source += r'''
 static void fixture_param_change(void *,const char *,const char *,DWORD,DWORD);
 static void (*real_ConfigEditor_ParamChange)(void *,const char *,const char *,DWORD,DWORD)=fixture_param_change;

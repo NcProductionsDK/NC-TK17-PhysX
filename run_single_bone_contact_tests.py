@@ -76,6 +76,8 @@ source+=r'''
 static int body_chain_vec3_sane_limit(const float v[3],float limit){for(int a=0;a<3;a++)if(!isfinite(v[a])||fabsf(v[a])>limit)return 0;return 1;}
 '''
 source+=function('physx_collision_frame.c','body_collision_view_to_world')
+source+='static int physx_customizer_active;\n'
+source+=function('NC-TK17-PhysX.c','body_collision_person_allowed')
 source+=(ROOT/'physx_single_bone_contact.c').read_text()
 source+=function('physx_physics.c','breasts_physics_apply_output')
 source+=function('physx_butt.c','butt_physics_apply_output')

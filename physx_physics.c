@@ -19,6 +19,32 @@ static void body_chain_apply_link_inertia(const body_chain_person_state_t *state
 static int body_chain_limit_total_rotation(const body_chain_physics_config_t *cfg,
     float value[3][3],float velocity[3][3],int link_count);
 
+/* Primary gravity already confirmed the live root/TRS orientation. Its
+   channels use the same rows as the collision/dynamics frame, with configured
+   signs applied. Recover the unsigned direction instead of independently
+   mixing live bones with the captured camera and waiting a second time. */
+static int body_chain_confirmed_geometry_direction(const body_chain_person_state_t *state,
+    float direction[3])
+{
+    float signs[3] = { physics_environment_cfg.gravity_horizontal_basis_sign,
+        physics_environment_cfg.gravity_vertical_basis_sign,
+        physics_environment_cfg.gravity_horizontal_secondary_basis_sign };
+    float length;
+    int axis;
+    if (!state->gravity_sample.trusted_valid || !state->gravity_sample.accepted ||
+        !state->gravity_reference_sample.trusted_valid ||
+        state->gravity_sample.source != (uintptr_t)state->root_raw ||
+        _stricmp(physics_environment_cfg.gravity_basis_node, "root")) return 0;
+    for (axis=0;axis<3;axis++) {
+        if (!isfinite(signs[axis]) || fabsf(signs[axis])<.000001f) return 0;
+        direction[axis]=state->gravity_sample.trusted[axis]/signs[axis];
+    }
+    length=physx_vec3_len(direction);
+    if (!isfinite(length) || length<.000001f) return 0;
+    for (axis=0;axis<3;axis++) direction[axis]/=length;
+    return 1;
+}
+
 static void body_chain_shape_gravity(int person,body_chain_person_state_t *state,
     const body_chain_physics_config_t *cfg,DWORD now,float dt,
     const float configured[3][3],float target[3][3])
@@ -30,11 +56,12 @@ static void body_chain_shape_gravity(int person,body_chain_person_state_t *state
     /* Collision readiness includes a load/placement settling delay. Gravity
        needs a valid orientation, not permission to apply contact response.
        Keep the established direction while the basis is temporarily absent. */
-    /* Geometric gravity uses the same sample protocol as the primary drive.
-       Gather while held too, so both can confirm promptly after the camera stops. */
+    /* Use the already-confirmed root direction when available. Unsupported
+       mappings retain the independently camera-guarded legacy sampler. */
     {
         float candidate[3], trusted[3];
-        int valid = body_chain_collider_states[person].basis_valid &&
+        int confirmed = body_chain_confirmed_geometry_direction(state, trusted);
+        int valid = !confirmed && body_chain_collider_states[person].basis_valid &&
             !body_chain_camera_pivot_hold_active(now) &&
             room_collision_world_vector_to_body_local(&body_chain_collider_states[person],
                 physics_environment_cfg.world_gravity, candidate);
@@ -43,12 +70,12 @@ static void body_chain_shape_gravity(int person,body_chain_person_state_t *state
             valid = length > .00001f && isfinite(length);
             if (valid) for (a=0;a<3;a++) candidate[a] /= length;
         }
-        if (gravity_sample_live(&state->geometry_sample,state->root_raw,
+        if (confirmed || (gravity_sample_live(&state->geometry_sample,state->root_raw,
                 candidate,valid,now,trusted) && state->geometry_sample.accepted &&
-            !state->gravity_camera_hold_active) {
+            !state->gravity_camera_hold_active)) {
             float response=physics_environment_cfg.gravity_response_ms*.001f;
             float alpha=response>0?1.0f-expf(-dt/response):1.0f;
-            if (state->geometry_sample.accepted_jump) {
+            if (confirmed ? !state->dynamics_gravity_valid : state->geometry_sample.accepted_jump) {
                 state->dynamics_gravity_valid=0;
                 state->geometry_sample.accepted_jump=0;
             }
@@ -1195,6 +1222,18 @@ static void run_body_chain_gravity_probe(const char *person,
         }
         return;
     }
+    if (!state->gravity_probe_promoted &&
+        body_gravity_relative_startup_ready(person, state, root_raw, now)) {
+        state->gravity_probe_captured = state->gravity_probe_promoted = 1;
+        state->gravity_probe_sampled = 1;
+        memcpy(state->gravity_probe_root, root, sizeof(state->gravity_probe_root));
+        state->gravity_probe_candidate_tick = now;
+        state->gravity_probe_candidate_camera_version = captured_camera_version;
+        capture_initial_gravity_reference = 1;
+        log_line("physics-environment gravity-probe relative-ready person=\"%s\" system=\"%s\" elapsed_ms=%lu note=\"confirmed live body/TRS directions; view-space root and camera movement do not gate startup\"",
+            person, system_name, (unsigned long)(now - state->init_tick));
+        goto compute_gravity_drive;
+    }
     settle_ms = body_chain_gravity_effective_settle_ms(
         state, now, &reactivation_fast);
     if (runtime_mode) {
@@ -1637,7 +1676,11 @@ compute_gravity_drive:
                         (dynamic_basis_used == 1 && gravity_camera_compensated) ||
                         (dynamic_basis_used != 0 &&
                          !physics_environment_cfg.gravity_basis_camera_compensate);
-            int available = gravity_sample_live(&state->gravity_sample, basis_raw,
+            int available = body_gravity_sample_live(person,
+                &state->camera_relative_trs_raw, &state->gravity_sample,
+                &state->gravity_reference_sample, basis_raw,
+                gravity_camera_compensated && isfinite(gravity_len) &&
+                    gravity_len > .000001f ? gravity_basis_n : NULL,
                 candidate, valid, now, trusted);
             state->gravity_camera_hold_active = !state->gravity_sample.accepted;
             if (!available || state->gravity_camera_hold_active) return;
@@ -1872,7 +1915,9 @@ static int body_chain_seed_clothing_resume(body_chain_person_state_t *state,
 {
     float angle[3][3] = {{0}}, desired[3][3];
     int i, axis;
-    if (!state->clothing_resume_pending || state->clothing_resume_pose_valid) return 0;
+    if ((!state->clothing_resume_pending && !state->pose_load_resume_pending &&
+         !state->activation_resume_pending) ||
+        state->clothing_resume_pose_valid) return 0;
     for (i = 0; i < 3; ++i) for (axis = 0; axis < 3; ++axis) {
         float compensation = link_count == 3 && state->pose_compensation_valid ?
             state->pose_compensation[i][axis] : 0.0f;
@@ -1927,6 +1972,33 @@ static void body_chain_write_clothing_resume_pose(body_chain_person_state_t *sta
         out[i][axis] = state->rest[i][axis] + state->angle[i][axis] -
             (link_count == 3 && state->pose_compensation_valid ?
                 state->pose_compensation[i][axis] : 0.0f);
+}
+
+/* Reuse the bounded spring/residual restart used for clothing, but seed it
+   exclusively from the NEW pose, after native loading and key creation end.
+   The authored OFF snapshot is separate and must remain exact. */
+static int body_chain_seed_pose_load_resume(int person_index,
+    body_chain_person_state_t *state, const float visible[3][3])
+{
+    if (person_index < 0 || person_index >= 4 ||
+        !(poseedit_penis_resume_mask & (1u << person_index))) return 0;
+    if (body_chain_runtime_mode_active() ||
+        poseedit_penis_resume_editor != captured_poseedit_this) {
+        poseedit_penis_resume_mask = 0;
+        return 0;
+    }
+    if (physx_poseedit_transition_busy()) return 0;
+    poseedit_penis_resume_mask &= ~(1u << person_index);
+    if (!body_chain_physics_cfg.enabled ||
+        !body_chain_physics_cfg.enabled_person[person_index]) return 0;
+    state->pose_load_resume_pending = 1;
+    if (!body_chain_seed_clothing_resume(state, &body_chain_physics_cfg, visible, 3)) {
+        state->pose_load_resume_pending = 0;
+        return 0;
+    }
+    log_line("PoseEdit file handoff smooth-restart person=%d note=\"seeded from the incoming pose after native reset; no previous pose motion retained\"",
+             person_index + 1);
+    return 1;
 }
 
 static void body_update_record_publish(int person_index, int system, DWORD now, int rate)
@@ -2319,7 +2391,12 @@ static void run_body_chain_physics_for_person(int person_index, DWORD now)
             body_chain_active_gravity_cache(person_index, 0),
             "penis_physics");
         physx_perf_add(PHYSX_PERF_PENIS_GRAVITY, perf_section_start);
-        if (body_chain_seed_clothing_resume(state, &body_chain_physics_cfg, pre_physx_output, 3))
+        /* Every fresh ownership starts at the live pose, including ordinary
+           OFF -> ON. Never reuse a previous skeleton's residual or velocity. */
+        state->activation_resume_pending = 1;
+        state->clothing_resume_pose_valid = 0;
+        if (body_chain_seed_pose_load_resume(person_index, state, pre_physx_output) ||
+            body_chain_seed_clothing_resume(state, &body_chain_physics_cfg, pre_physx_output, 3))
             body_chain_write_clothing_resume_pose(state, out, 3);
         if (runtime_mode) body_chain_publish_runtime_pose(person_index, 0, out);
         /* Preserve the captured first pose exactly. Spring integration starts
@@ -2620,12 +2697,15 @@ static void run_body_chain_physics_for_person(int person_index, DWORD now)
                  physics_environment_cfg.gravity_max_degrees_per_second);
     }
 
-    if (state->clothing_resume_pending) {
+    if (state->clothing_resume_pending || state->pose_load_resume_pending ||
+        state->activation_resume_pending) {
         h_step = v_step = d_step = 0.0f;
         memset(parent_rotation_step, 0, sizeof(parent_rotation_step));
         memset(&state->root_drive_filter, 0, sizeof(state->root_drive_filter));
     }
     state->clothing_resume_pending = 0;
+    state->pose_load_resume_pending = 0;
+    state->activation_resume_pending = 0;
     perf_section_start = physx_perf_counter();
     body_contact_begin_step(person_index, state, 0, now, dt);
     face_down_translation = body_chain_face_down_translation_active(state);
@@ -2791,6 +2871,8 @@ static void run_body_chain_physics_for_person(int person_index, DWORD now)
 
         }
     } /* Substeps complete; publish only the final chain pose. */
+
+    if (!runtime_mode) body_chain_advance_pose_start(state, dt);
 
     for (i = 0; i < 3; i++) {
         for (axis = 0; axis < 3; axis++) {
@@ -3153,9 +3235,12 @@ static void run_testicle_physics_for_person(int person_index, DWORD now)
         return;
     }
 
-    /* Only clothing initialization consumes this snapshot. Normal active
-       updates and gravity-readiness retries already have their starting pose. */
-    if (state->clothing_resume_pending && !state->clothing_resume_pose_valid)
+    /* Capture before native inertia/animation ownership can change output.
+       Initialization also occurs when live skeleton bindings are replaced. */
+    if (!state->initialized || root_raw != state->root_raw ||
+        joint_raw[0] != state->joint_raw[0] ||
+        joint_raw[1] != state->joint_raw[1] ||
+        joint_raw[2] != state->joint_raw[2])
         for (i = 0; i < 3; ++i) for (axis = 0; axis < 3; ++axis)
             pre_physx_output[i][axis] = out[i][axis];
 
@@ -3171,6 +3256,14 @@ static void run_testicle_physics_for_person(int person_index, DWORD now)
     }
 
     if (!runtime_mode && cfg->override_animation) {
+        if (!state->initialized || root_raw != state->root_raw ||
+            joint_raw[0] != state->joint_raw[0] || joint_raw[1] != state->joint_raw[1] ||
+            joint_raw[2] != state->joint_raw[2]) {
+            state->pose_compensation_valid=0;
+            /* Empty/custom tracks keep the existing live-output handoff;
+               inability to evaluate an optional bend must not block PhysX. */
+            capture_testicle_pose_start(person_index,person,state,pre_physx_output);
+        }
         poseeditor_suppressed =
             suppress_poseeditor_testicle_track_for_person(
             person_index, person, state);
@@ -3297,6 +3390,8 @@ static void run_testicle_physics_for_person(int person_index, DWORD now)
             person, state, root_raw, root, now,
             body_chain_active_gravity_cache(person_index, 1),
             "testicle_physics");
+        state->activation_resume_pending = 1;
+        state->clothing_resume_pose_valid = 0;
         if (body_chain_seed_clothing_resume(state, cfg, pre_physx_output, 2))
             body_chain_write_clothing_resume_pose(state, out, 2);
         if (runtime_mode) body_chain_publish_runtime_pose(person_index, 1, out);
@@ -3547,12 +3642,13 @@ static void run_testicle_physics_for_person(int person_index, DWORD now)
                  physics_environment_cfg.gravity_max_degrees_per_second);
     }
 
-    if (state->clothing_resume_pending) {
+    if (state->clothing_resume_pending || state->activation_resume_pending) {
         h_step = v_step = d_step = 0.0f;
         memset(parent_rotation_step, 0, sizeof(parent_rotation_step));
         memset(&state->root_drive_filter, 0, sizeof(state->root_drive_filter));
     }
     state->clothing_resume_pending = 0;
+    state->activation_resume_pending = 0;
     body_contact_begin_step(person_index, state, 1, now, dt);
     face_down_translation = body_chain_face_down_translation_active(state);
     translation_drive_step[0] = h_step;
@@ -5604,7 +5700,8 @@ static int breasts_physics_build_gravity_sag_target(
    root_offset, so it must not pass through the position-based startup probe. */
 static int breasts_physics_spine_gravity_drive(
     void *spine_raw, const body_chain_physics_config_t *cfg,
-    gravity_sample_t *sample, DWORD now, float out[3])
+    gravity_sample_t *sample, gravity_sample_t *reference_sample,
+    const char *person, void **trs_cache, DWORD now, float out[3])
 {
     float gravity_view[3];
     float gravity_world[3];
@@ -5645,7 +5742,8 @@ static int breasts_physics_spine_gravity_drive(
 sample_gravity:
     {
         float trusted[3];
-        if (!gravity_sample_live(sample,spine_raw,out,valid,now,trusted)) {
+        if (!body_gravity_sample_live(person, trs_cache, sample, reference_sample,
+                spine_raw, valid ? gravity_view : NULL, out, valid, now, trusted)) {
             out[0] = out[1] = out[2] = 0.0f;
             return 0;
         }
@@ -5763,6 +5861,44 @@ static void paired_body_rotation_step(const body_chain_physics_config_t *cfg,
                 target[axis], cfg->stiffness, cfg->damping, step_dt);
             rotation[axis] = body_chain_clamp_link_axis_angle(cfg, 0, axis, rotation[axis]);
         }
+    }
+}
+
+/* Preserve the captured source pose on the first published frame. Keep spring
+   angles bounded and ease only the out-of-limit residual back to normal rest.
+   Source handoff/translation snapshots remain untouched for exact release. */
+static void paired_body_seed_activation(breasts_physics_person_state_t *state,
+    const body_chain_physics_config_t *cfg)
+{
+    int side, axis;
+    memcpy(state->activation_base_rest, state->rest_rotation,
+           sizeof(state->rest_rotation));
+    for (side = 0; side < 2; ++side) for (axis = 0; axis < 3; ++axis) {
+        state->rotation[side][axis] = body_chain_clamp_link_axis_angle(cfg, 0, axis,
+            state->source_handoff[side][axis] - state->rest_rotation[side][axis]);
+        state->rest_rotation[side][axis] = state->source_handoff[side][axis] -
+            state->rotation[side][axis];
+        state->angular_velocity[side][axis] = 0.0f;
+    }
+    state->activation_rest_pending = 1;
+}
+
+static void paired_body_advance_activation(breasts_physics_person_state_t *state, float dt)
+{
+    int side, axis;
+    float largest = 0.0f, decay;
+    if (!state->activation_rest_pending || !isfinite(dt) || dt <= 0.0f) return;
+    decay = expf(-dt / 0.060f);
+    for (side = 0; side < 2; ++side) for (axis = 0; axis < 3; ++axis) {
+        float residual = (state->rest_rotation[side][axis] -
+            state->activation_base_rest[side][axis]) * decay;
+        state->rest_rotation[side][axis] = state->activation_base_rest[side][axis] + residual;
+        if (fabsf(residual) > largest) largest = fabsf(residual);
+    }
+    if (largest < 0.00001f) {
+        memcpy(state->rest_rotation, state->activation_base_rest,
+               sizeof(state->rest_rotation));
+        state->activation_rest_pending = 0;
     }
 }
 
@@ -5913,6 +6049,7 @@ static void run_breasts_physics_for_person(int person_index, DWORD now)
                 state->collision_free_velocity[side][axis] = 0.0f;
             }
         }
+        paired_body_seed_activation(state, cfg);
         breasts_physics_capture_animation_rows(state);
     }
 
@@ -5935,6 +6072,7 @@ static void run_breasts_physics_for_person(int person_index, DWORD now)
         state->motion.init_tick = now;
         memset(&state->gravity_motion, 0, sizeof(state->gravity_motion));
         memset(&state->spine_gravity_sample, 0, sizeof(state->spine_gravity_sample));
+        memset(&state->spine_gravity_reference_sample, 0, sizeof(state->spine_gravity_reference_sample));
         state->gravity_motion.initialized = 1;
         state->gravity_motion.root_raw = gravity_root_raw;
         state->gravity_motion.init_tick = now;
@@ -6022,7 +6160,9 @@ static void run_breasts_physics_for_person(int person_index, DWORD now)
         physics_environment_cfg.world_gravity_probe &&
         physics_environment_cfg.gravity_apply_to_body_chain) {
         breasts_physics_spine_gravity_drive(
-            root_raw, cfg, &state->spine_gravity_sample, now, spacing_gravity_drive);
+            root_raw, cfg, &state->spine_gravity_sample,
+            &state->spine_gravity_reference_sample, person,
+            &state->gravity_motion.camera_relative_trs_raw, now, spacing_gravity_drive);
     }
     /* Orientation gravity rotates around the captured rest pose. Optional
        translation sag is added separately to the bone-translation spring. */
@@ -6049,6 +6189,7 @@ static void run_breasts_physics_for_person(int person_index, DWORD now)
                 cfg, 0, axis,
                 target[side][axis] * cfg->link_gain[0]);
         }
+        if (!side) paired_body_advance_activation(state, dt);
         paired_body_rotation_step(cfg, state->rotation[side],
             state->angular_velocity[side], target[side], dt);
     }
@@ -6237,6 +6378,7 @@ static int physx_body_chain_apply_traverse_overlay(void *object,
                                                    int allow_global)
 {
     int applied;
+    if (physx_shutting_down) return 0;
     (void)object;
     if (!body_chain_runtime_mode_active()) {
         InterlockedExchange(&body_chain_traverse_overlay_active, 0);
@@ -6253,6 +6395,7 @@ static int physx_body_chain_apply_traverse_overlay(void *object,
 static void physx_body_chain_apply_post_animation_ownership(void)
 {
     int applied;
+    if (physx_shutting_down) return;
     breasts_physics_apply_all_outputs(1);
     butt_physics_apply_all_outputs(1);
     if (!body_chain_runtime_mode_active() ||
@@ -6464,6 +6607,7 @@ static void run_testicle_physics_late_ownership(DWORD now)
 
 static void physx_late_frame_ownership_tick(void)
 {
+    if (physx_shutting_down) return;
     DWORD now = GetTickCount();
     LONGLONG perf_start = physx_perf_counter();
     LONGLONG phase_start;
@@ -6492,10 +6636,12 @@ static void run_body_chain_physics_selected(DWORD now, unsigned int persons)
     static DWORD seen_physics_setting_tick[4];
     static DWORD seen_collision_setting_tick[4];
     static DWORD seen_config_reload_tick[4];
+    if (runtime_mode) poseedit_penis_resume_mask = 0;
     body_profile_set_active_person_config(-1);
     if (!body_chain_physics_cfg.enabled || !engine_FindObjC) {
         for (i = 0; i < 4; i++) {
             if (!(persons & (1u << i))) continue;
+            poseedit_penis_resume_mask &= ~(1u << i);
             int was_active = previous_active[i];
             body_chain_person_state_t *state =
                 body_chain_active_person_state(i, 0);
@@ -6601,6 +6747,7 @@ static void run_body_chain_physics_selected(DWORD now, unsigned int persons)
             run_body_chain_physics_for_person(i, now);
         } else {
             int was_active = previous_active[i];
+            poseedit_penis_resume_mask &= ~(1u << i);
             body_chain_person_state_t *state =
                 body_chain_active_person_state(i, 0);
             if (body_chain_physics_settings_change_tick[i] &&

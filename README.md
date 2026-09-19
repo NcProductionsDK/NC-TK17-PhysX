@@ -186,6 +186,78 @@ See [the plugin review](docs/PLUGIN-REVIEW.md) for remaining engineering work.
 
 Global settings are read from `Extensions/PhysX/Config.ini`. The plugin creates the `Extensions/PhysX` directories and writes its documented default configuration when the file is missing. Body and addon-specific `.physx.ini` sidecars can override relevant settings and are reloaded when changed. Some global controls are also available through the in-game configuration editor.
 
+For an add-on body, place `body01.physx.ini`, `body02.physx.ini`, or
+`body03.physx.ini` beside the corresponding `bodyXX.bs` in
+`Addons/<your add-on>/Scenes/Shared/Body/`. The sidecar overrides only the
+person loading that body; unspecified settings inherit the global configuration.
+Binding uses the loaded file path and TK17's per-person body-load or body-selection
+events. It does not inspect blendshapes, mesh names, or the contents of the body
+file, and needs no special morphs or identification entries in the sidecar.
+Loading a replacement body clears the previous profile while its exact path is
+resolved; a body without a sidecar uses global settings. Ambiguous file-open
+candidates are left unbound. Run `python run_body_profile_binding_tests.py` from
+this directory for the binding regression tests.
+
+To isolate a body collider while adjusting its radius or offset, use:
+
+```ini
+[body_colliders]
+debug_draw = true
+debug_draw_person = 1
+debug_draw_filter = spine02
+debug_draw_capsules = false
+```
+
+`debug_draw_person` is global only: `0` shows all people, `1` through `4` select
+Person01 through Person04. `debug_draw`, `debug_draw_filter`, and
+`debug_draw_capsules` can also be set in a body sidecar; omitted keys inherit
+the global settings. Changes use the existing INI live reload. Set the filter to
+`all` and capsules to `true` to restore the full view. The defaults preserve
+existing drawing. These controls affect body debug visuals only; physics and
+the separate room/accessory debug controls are unchanged.
+
+Filter names are case-insensitive: `pelvis`, `spine01` through `spine04`, `neck`,
+`head`, `testicles01`, `testicles02`, `testicles`, or `penis` (the capsule chain).
+Paired names `hip`, `thigh`, `knee`, `ankle`, `ball`, `breast`, `butt`, `clavicle`,
+`shoulder`, `elbow`, `forearm`, `wrist`, `palm`, and `finger01` through `finger05`
+select both sides. Prefix a paired name with `left_` or `right_` for one side.
+Finger joints can be selected individually, e.g. `left_finger02_03` or
+`right_finger01_end`. One name is accepted at a time; an unknown name hides
+body shapes and logs a diagnostic. With capsules enabled, connections touching
+the selected node(s) remain visible. Disable capsules to see just the selected
+spheres/ovals. Filtering works in Hook5, Direct3D 8, and OpenGL drawing paths.
+
+Run `python run_collider_debug_filter_tests.py` to check INI inheritance,
+selection, and the production Hook5 geometry collector.
+
+Penis collision capsules support these global and body-sidecar settings:
+
+```ini
+[body_colliders]
+penis_radius = 0.0275
+penis01_fine_offset = 0,0,0
+penis02_fine_offset = 0,0,0
+penis03_fine_offset = 0,0,0
+```
+
+`penis_radius` is a circular capsule radius, clamped to 0.001-0.25. Each offset
+is a body-local XYZ displacement of that joint's collision point. The terminal
+point also receives `penis03_fine_offset`, preserving the final segment's length.
+The capsules share their adjusted endpoints. Raw animation pivots, gravity and
+inertia samples remain unchanged; contact prediction, passive colliders and all
+three drawing paths use the adjusted geometry. Edits reload live.
+
+`collision_margin_radius` retains the old shared/testicle probe thickness
+independently of the penis's dimensions. It is not an additional margin on top of
+`penis_radius`. A legacy `chain_radius` value supplies either radius when that
+replacement key is absent in the same INI. Sidecar keys override inherited global
+values. The supplied configs preserve both previous radius values during this
+migration, with zero offsets. Missing global keys default to 0.018 and zero offsets.
+XYZ oval radii and separate per-segment radii are not implemented.
+
+Run `python run_penis_collider_tests.py` for config, geometry, contact prediction,
+joint-space solve and wire-drawing regressions.
+
 For troubleshooting, check `Logs/NC-TK17-PhysX.log` and enable debug options only when needed, as verbose diagnostics can generate substantial output.
 
 See [COLLISION-NOTES.md](COLLISION-NOTES.md) for the collision changes, automated

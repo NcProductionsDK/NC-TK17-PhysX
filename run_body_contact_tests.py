@@ -34,7 +34,7 @@ static float vec3_dot(const float *a,const float *b){return a[0]*b[0]+a[1]*b[1]+
 static float physx_vec3_len(const float *v){return sqrtf(vec3_dot(v,v));}
 typedef struct {int horizontal_output_axis,vertical_output_axis,rotation_tail_axis[3],output_offset,collision_scope;float link_min_angle[3][3],link_max_angle[3][3];} body_chain_physics_config_t;
 static body_chain_physics_config_t body_chain_physics_cfg;
-static struct {float response_strength,response_max_degrees_per_tick;int collision_iterations;float link_length[3];} body_chain_collider_cfg={1,20,2,{.5f,.5f,.5f}};
+static struct {float response_strength,response_max_degrees_per_tick;int collision_iterations;float link_length[3];float penis_fine_offset[3][3];} body_chain_collider_cfg={1,20,2,{.5f,.5f,.5f},{{0}}};
 typedef struct {
     float angle[3][3],velocity[3][3],collision_step_points[4][3],collision_step_angle[3][3],collision_free_target[3][3];
     DWORD collision_step_tick;
@@ -81,7 +81,8 @@ fixture+=function('body_chain_closest_segment_pair',colliders)
 for name in ['body_collider_wrap_degrees','body_collider_rotate_local_vector',
              'body_collider_rotate_point_about_pivot','body_chain_live_points_with_delta_cfg']:
     fixture+=function(name,colliders)
-for name in ['body_contact_inverse_inertia','body_contact_predict','body_contact_candidate_points','body_contact_point','body_contact_jacobian',
+fixture+=function('body_chain_penis_offset_points',(root/'physx_penis_collider.c').read_text())
+for name in ['body_contact_inverse_inertia','body_contact_predict','body_contact_predict_geometry','body_contact_candidate_points','body_contact_point','body_contact_jacobian',
              'body_contact_pose_error',
              'body_contact_bound_correction','body_contact_overlap_error','body_contact_limit_velocity',
              'body_contact_orient_from_history','body_contact_refine_combined',

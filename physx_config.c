@@ -25,6 +25,7 @@ typedef struct body_profile_log_observer_t {
 } body_profile_log_observer_t;
 
 static physx_settings_binding_t physx_settings_bindings[] = {
+    { "NCPhysXPresets", "presets", "selected", NULL },
     { "NCPhysXBreastsPhysics", BREASTS_PHYSICS_CONFIG_SECTION, "enabled", NULL },
     { "NCPhysXPenisPhysics", PENIS_PHYSICS_CONFIG_SECTION, "enabled", NULL },
     { "NCPhysXTesticlePhysics", TESTICLE_PHYSICS_CONFIG_SECTION, "enabled", NULL },
@@ -51,6 +52,8 @@ static physx_settings_binding_t physx_settings_bindings[] = {
     { "NCPhysXTesticleCollisionStrength", TESTICLE_PHYSICS_CONFIG_SECTION, "collision_strength", NULL },
     { "NCPhysXButtCollisionStrength", BUTT_PHYSICS_CONFIG_SECTION, "collision_strength", NULL }
 };
+
+#include "physx_presets.c"
 
 static int physx_settings_bool_value(const char *value, int *enabled)
 {
@@ -302,6 +305,10 @@ static int physx_setting_ini_spinbox_value(
     if (!binding || !out || out_size == 0) return 0;
     out[0] = 0;
     if (!config_path[0]) config_file_path(config_path, sizeof(config_path));
+    if (!strcmp(binding->param_name, "NCPhysXPresets")) {
+        lstrcpynA(out, physx_preset_name, (int)out_size);
+        return 1;
+    }
     if (!GetPrivateProfileStringA(binding->section, binding->key, "", out,
                                   (DWORD)out_size, config_path) || !out[0])
         return 0;
@@ -319,8 +326,8 @@ static int physx_setting_ini_spinbox_value(
 static void physx_sync_spinbox_from_ini(
     const physx_settings_binding_t *binding, void *widget)
 {
-    char requested[128];
-    char current[128];
+    char requested[MAX_PATH];
+    char current[MAX_PATH];
     if (!binding || !widget ||
         !physx_setting_ini_spinbox_value(binding, requested,
                                          sizeof(requested))) return;
@@ -389,6 +396,8 @@ static void physx_sync_slider_from_ini(const physx_settings_binding_t *binding,v
         log_line("settings slider sync param=\"%s\" ini=%.6g success=%d",binding->param_name,requested,synced);
 }
 
+#include "physx_presets_ui.c"
+
 static void physx_write_slider_value(const physx_settings_binding_t *binding, float value)
 {
     char normalized[32], saved[32];
@@ -405,7 +414,7 @@ static void physx_write_slider_value(const physx_settings_binding_t *binding, fl
         physx_sync_slider_from_ini(binding, binding->slider_widget);
         return;
     }
-    if (WritePrivateProfileStringA(binding->section, binding->key, normalized, config_path)) {
+    if (WritePrivateProfileStringA(binding->section, binding->key, normalized, physx_settings_write_path(binding->section))) {
         log_line("settings slider saved param=\"%s\" value=%s ini=[%s] %s note=\"normal INI hot-reload scheduled\"",
                  binding->param_name, normalized, binding->section, binding->key);
         physx_sync_slider_from_ini(binding, binding->slider_widget);
@@ -440,6 +449,7 @@ static void __cdecl hook_PhysX_ConfigEditorCallback(
     const char *name = stringref_cstr_a(parameter);
     const physx_settings_binding_t *binding = physx_settings_binding_by_name(name);
     int is_strength = binding && strcmp(binding->key, "collision_strength") == 0;
+    int is_preset = name && !strcmp(name, "NCPhysXPresets");
     int was_syncing = physx_settings_sync_depth != 0;
     int captured = 0;
     float value = 0;
@@ -454,6 +464,8 @@ static void __cdecl hook_PhysX_ConfigEditorCallback(
     if (real_PhysX_ConfigEditorCallback)
         real_PhysX_ConfigEditorCallback(self, parameter, text, value_arg, numeric_value);
     if (is_strength) physx_settings_sync_depth--;
+    if (is_preset && !was_syncing)
+        physx_sync_controls(physx_settings_customizer);
     if (captured) {
         physx_write_slider_value(binding, value);
     } else if (is_strength && !was_syncing) {
@@ -512,38 +524,34 @@ static void patch_physx_slider_creation(void)
     }
 }
 
-static int physx_build_controls_and_sync(
-    void *self, void *arg1, void *arg2, void *arg3)
+static void physx_sync_controls(void *self)
 {
-    int result;
     void **parameters = NULL;
     void **records = NULL;
     int parameter_count = 0;
     int record_count = 0;
     int count;
     int index;
-    result = real_Customizer_BuildControls ?
-        real_Customizer_BuildControls(self, arg1, arg2, arg3) : 0;
     if (!self ||
         !ptr_readable((BYTE*)self + 0x14, sizeof(parameters)) ||
-        !ptr_readable((BYTE*)self + 0x18, sizeof(records))) return result;
+        !ptr_readable((BYTE*)self + 0x18, sizeof(records))) return;
     memcpy(&parameters, (BYTE*)self + 0x14, sizeof(parameters));
     memcpy(&records, (BYTE*)self + 0x18, sizeof(records));
     if (!parameters || !records ||
         !ptr_readable((BYTE*)parameters - sizeof(parameter_count),
                       sizeof(parameter_count)) ||
         !ptr_readable((BYTE*)records - sizeof(record_count),
-                      sizeof(record_count))) return result;
+                      sizeof(record_count))) return;
     memcpy(&parameter_count,
            (BYTE*)parameters - sizeof(parameter_count),
            sizeof(parameter_count));
     memcpy(&record_count, (BYTE*)records - sizeof(record_count),
            sizeof(record_count));
     if (parameter_count <= 0 || record_count <= 0 ||
-        parameter_count > 4096 || record_count > 4096) return result;
+        parameter_count > 4096 || record_count > 4096) return;
     count = parameter_count < record_count ? parameter_count : record_count;
     if (!ptr_readable(parameters, (size_t)count * sizeof(*parameters)) ||
-        !ptr_readable(records, (size_t)count * sizeof(*records))) return result;
+        !ptr_readable(records, (size_t)count * sizeof(*records))) return;
     for (index = 0; index < count; index++) {
         char parameter_name[128];
         void *record = records[index];
@@ -553,9 +561,11 @@ static int physx_build_controls_and_sync(
             !physx_custom_parameter_name(parameters[index], parameter_name,
                                          sizeof(parameter_name))) continue;
         binding = physx_settings_binding_by_name(parameter_name);
+        if (binding && strcmp(binding->key, "collision_strength") &&
+            physx_sync_box_from_ini(self, index, record, binding)) continue;
         if (binding && strcmp(binding->key, "collision_strength") == 0) {
             /* Main slider is record+0x04; preset slots start at +0x08 and
-               must retain their own preset values. Spinboxes use +0x24. */
+               must retain their own preset values. Boxes use +0x18; text fields use +0x24. */
             if (ptr_readable((BYTE*)record + 0x04, sizeof(widget))) {
                 memcpy(&widget, (BYTE*)record + 0x04, sizeof(widget));
                 binding->slider_widget = widget;
@@ -568,6 +578,17 @@ static int physx_build_controls_and_sync(
         memcpy(&widget, (BYTE*)record + 0x24, sizeof(widget));
         if (widget) physx_sync_spinbox_from_ini(binding, widget);
     }
+}
+
+static int physx_build_controls_and_sync(
+    void *self, void *arg1, void *arg2, void *arg3)
+{
+    int result;
+    physx_preset_prepare_controls(self);
+    result = real_Customizer_BuildControls ?
+        real_Customizer_BuildControls(self, arg1, arg2, arg3) : 0;
+    physx_settings_customizer = self;
+    physx_sync_controls(self);
     return result;
 }
 
@@ -712,6 +733,8 @@ static void body_profile_tk17_cname_from_sidecar_a(const char *sidecar_path,
                                                    char *out,
                                                    size_t outsz)
 {
+    char normalized[MAX_PATH * 4];
+    char *scan;
     const char *addons;
     const char *start;
     const char *end;
@@ -719,8 +742,17 @@ static void body_profile_tk17_cname_from_sidecar_a(const char *sidecar_path,
     if (!out || outsz == 0) return;
     out[0] = 0;
     if (!sidecar_path) return;
-    addons = strstr(sidecar_path, "\\Addons\\");
-    if (!addons) addons = strstr(sidecar_path, "/Addons/");
+    lstrcpynA(normalized, sidecar_path, sizeof(normalized));
+    for (scan = normalized; *scan; scan++) {
+        if (*scan == '\\') *scan = '/';
+    }
+    addons = NULL;
+    for (scan = normalized; *scan; scan++) {
+        if (_strnicmp(scan, "/Addons/", 8) == 0) {
+            addons = scan;
+            break;
+        }
+    }
     if (!addons) return;
     start = addons + 8;
     end = strpbrk(start, "\\/");
@@ -805,139 +837,6 @@ static DWORD body_profile_xxh32_a(const char *s)
     return h32;
 }
 
-static int body_profile_signature_index(const body_profile_sidecar_entry_t *entry,
-                                        const char *name)
-{
-    int i;
-    if (!entry || !name || !name[0]) return -1;
-    for (i = 0; i < entry->signature_count; i++) {
-        if (_stricmp(entry->signature[i], name) == 0) return i;
-    }
-    return -1;
-}
-
-static int body_profile_signature_name_allowed_a(const char *name,
-                                                 const char *line)
-{
-    size_t len;
-    (void)line;
-    if (!name || !name[0]) return 0;
-    len = strlen(name);
-    if (len < 6 || len >= BODY_PROFILE_SIGNATURE_LEN) return 0;
-    if (strchr(name, '/') || strchr(name, '\\')) return 0;
-    if (_stricmp(name, "TRS_group") == 0 ||
-        _stricmp(name, "STRS_group") == 0 ||
-        _stricmp(name, "root") == 0 ||
-        _stricmp(name, "Sroot") == 0 ||
-        _stricmp(name, "body_mesh_group") == 0 ||
-        _stricmp(name, "Sbody_mesh_group") == 0 ||
-        _stricmp(name, "body_subdiv_cage") == 0 ||
-        _stricmp(name, "Sbody_subdiv_cage") == 0 ||
-        _stricmp(name, "body_subdiv_cageShape") == 0 ||
-        _stricmp(name, "Sbody_subdiv_cageShape") == 0) {
-        return 0;
-    }
-    if (contains_i(name, "_texture") ||
-        contains_i(name, "Shader") ||
-        contains_i(name, "_joint") ||
-        contains_i(name, "_locator") ||
-        contains_i(name, "_target") ||
-        contains_i(name, "_group")) {
-        return 0;
-    }
-
-    /*
-       Body sidecars must not bind from generic body02/body03 names.  Those
-       names exist on several add-on bodies, so accepting body_*_morph or
-       every BlendControl lets one sidecar bleed into every loaded person.
-       Keep only distinctive morph controls for automatic identity matching;
-       direct body-load/body-select binding still works without signatures.
-    */
-    if (contains_i(name, "body_blends_") ||
-        contains_i(name, "_morph") ||
-        contains_i(name, "body_subdiv") ||
-        contains_i(name, "__body_")) {
-        return 0;
-    }
-    if (contains_i(name, "Dangly") ||
-        contains_i(name, "Bulky") ||
-        contains_i(name, "Chin") ||
-        contains_i(name, "Under")) {
-        return 1;
-    }
-    return 0;
-}
-
-static void body_profile_add_signature_a(body_profile_sidecar_entry_t *entry,
-                                         const char *name)
-{
-    if (!entry || !name || !name[0]) return;
-    if (entry->signature_count >= BODY_PROFILE_SIGNATURE_COUNT) return;
-    if (body_profile_signature_index(entry, name) >= 0) return;
-    lstrcpynA(entry->signature[entry->signature_count], name,
-              sizeof(entry->signature[entry->signature_count]));
-    entry->signature_count++;
-}
-
-static int body_profile_extract_object_name_a(const char *line,
-                                              char *out,
-                                              size_t outsz)
-{
-    const char *p;
-    const char *q;
-    size_t len;
-    if (!line || !out || outsz == 0) return 0;
-    out[0] = 0;
-    p = strstr(line, "Object.Name");
-    if (!p) return 0;
-    p = strchr(p, '"');
-    if (!p) return 0;
-    p++;
-    q = strchr(p, '"');
-    if (!q || q <= p) return 0;
-    len = (size_t)(q - p);
-    if (len >= outsz) len = outsz - 1;
-    memcpy(out, p, len);
-    out[len] = 0;
-    return out[0] != 0;
-}
-
-static void body_profile_build_signatures_from_body_a(
-    body_profile_sidecar_entry_t *entry)
-{
-    FILE *f;
-    char line[768];
-    char name[BODY_PROFILE_SIGNATURE_LEN];
-    int pass;
-    if (!entry || !entry->body_path[0]) return;
-    memset(entry->signature, 0, sizeof(entry->signature));
-    entry->signature_count = 0;
-    memset(entry->person_signature_mask, 0, sizeof(entry->person_signature_mask));
-    f = fopen(entry->body_path, "rb");
-    if (!f) return;
-    for (pass = 0; pass < 2 && entry->signature_count < BODY_PROFILE_SIGNATURE_COUNT; pass++) {
-        fseek(f, 0, SEEK_SET);
-        while (fgets(line, sizeof(line), f)) {
-            if (!body_profile_extract_object_name_a(line, name, sizeof(name))) {
-                continue;
-            }
-            if (!body_profile_signature_name_allowed_a(name, line)) {
-                continue;
-            }
-            if (pass == 0 &&
-                !(contains_i(name, "Dangly") ||
-                  contains_i(name, "Bulky") ||
-                  contains_i(name, "Chin") ||
-                  contains_i(name, "Under"))) {
-                continue;
-            }
-            body_profile_add_signature_a(entry, name);
-            if (entry->signature_count >= BODY_PROFILE_SIGNATURE_COUNT) break;
-        }
-    }
-    fclose(f);
-}
-
 static int body_profile_parse_person_body_tsnode_a(const char *name,
                                                    int *person_index_out,
                                                    const char **tail_out)
@@ -958,98 +857,11 @@ static int body_profile_parse_person_body_tsnode_a(const char *name,
     return 1;
 }
 
-static int body_profile_popcount32(DWORD v)
-{
-    int count = 0;
-    while (v) {
-        count += (int)(v & 1u);
-        v >>= 1;
-    }
-    return count;
-}
-
 static void body_profile_activate_sidecar_for_person_a(int person_index,
                                                        int body_slot,
                                                        const char *body_path,
                                                        const char *sidecar_path,
                                                        const char *reason);
-
-static DWORD body_profile_last_runtime_probe_tick;
-static DWORD body_profile_runtime_miss_start_tick[BODY_PROFILE_PERSON_COUNT];
-static int body_profile_signature_ambiguity_logged[BODY_PROFILE_PERSON_COUNT];
-static int body_profile_signature_ambiguity_hits[BODY_PROFILE_PERSON_COUNT];
-
-static int body_profile_signature_is_generic_a(const char *name)
-{
-    if (!name || !name[0]) return 1;
-    return _stricmp(name, "TesticlesDangly") == 0 ||
-           _stricmp(name, "TesticlesVanilla") == 0 ||
-           _stricmp(name, "BulkyPenis") == 0 ||
-           _stricmp(name, "EyeUnderL") == 0 ||
-           _stricmp(name, "EyeUnderR") == 0;
-}
-
-static int body_profile_runtime_object_exists_a(const char *name)
-{
-    void *raw = NULL;
-    void *obj = NULL;
-    if (!name || !name[0]) return 0;
-    obj = resolve_find_obj(name, &raw);
-    if (!obj || is_nil_engine_object(raw, obj)) {
-        obj = resolve_script_engine_obj(name, &raw);
-    }
-    return obj && !is_nil_engine_object(raw, obj);
-}
-
-static int body_profile_runtime_signature_exists_a(int person_index,
-                                                   const char *leaf,
-                                                   char *matched,
-                                                   size_t matched_sz)
-{
-    char name[192];
-    if (matched && matched_sz) matched[0] = 0;
-    if (person_index < 0 || person_index >= BODY_PROFILE_PERSON_COUNT ||
-        !leaf || !leaf[0]) {
-        return 0;
-    }
-    _snprintf(name, sizeof(name), "Person%02dBody:%s",
-              person_index + 1, leaf);
-    name[sizeof(name) - 1] = 0;
-    if (!body_profile_runtime_object_exists_a(name)) return 0;
-    if (matched && matched_sz) {
-        lstrcpynA(matched, name, (int)matched_sz);
-    }
-    return 1;
-}
-
-static int body_profile_runtime_person_body_present_a(int person_index)
-{
-    char name[160];
-    static const char *anchors[] = {
-        "body_subdiv_cageShape",
-        "body_subdiv_cage",
-        "TRS_group",
-        "STRS_group"
-    };
-    int i;
-    if (person_index < 0 || person_index >= BODY_PROFILE_PERSON_COUNT) {
-        return 0;
-    }
-    for (i = 0; i < (int)(sizeof(anchors) / sizeof(anchors[0])); i++) {
-        _snprintf(name, sizeof(name), "Person%02dBody:%s",
-                  person_index + 1, anchors[i]);
-        name[sizeof(name) - 1] = 0;
-        if (body_profile_runtime_object_exists_a(name)) return 1;
-    }
-    return 0;
-}
-
-static int body_profile_bind_strength_from_reason_a(const char *reason)
-{
-    if (!reason || !reason[0]) return 2;
-    if (contains_i(reason, "signature")) return 1;
-    return 2;
-}
 
 static void body_profile_clear_person_sidecar_a(int person_index,
                                                 const char *reason)
@@ -1059,194 +871,18 @@ static void body_profile_clear_person_sidecar_a(int person_index,
         !body_profile_person_sidecar_path[person_index][0]) {
         return;
     }
-    log_line("body-profile sidecar fallback person=\"Person%02d\" source=\"%s\" note=\"live PersonXXBody no longer matches an active body sidecar; using global PhysX INI for this person\"",
-             person_index + 1, reason ? reason : "runtime-signature-miss");
+    log_line("body-profile sidecar fallback person=\"Person%02d\" source=\"%s\" note=\"body load changed; using global PhysX INI for this person\"",
+             person_index + 1, reason ? reason : "body-load");
     body_profile_person_sidecar_active[person_index] = 0;
     body_profile_person_sidecar_path[person_index][0] = 0;
     body_profile_person_body_path[person_index][0] = 0;
     body_profile_person_body_hash[person_index] = 0;
-    body_profile_person_bind_strength[person_index] = 0;
     memset(&body_profile_person_sidecar_write_time[person_index], 0,
            sizeof(body_profile_person_sidecar_write_time[person_index]));
     InterlockedExchange(&body_profile_reload_pending, 1);
 }
 
-static void body_profile_probe_runtime_bindings(DWORD now)
-{
-    int person_index;
-    int i;
-    if (body_profile_last_runtime_probe_tick &&
-        now - body_profile_last_runtime_probe_tick < 1000u) {
-        return;
-    }
-    body_profile_last_runtime_probe_tick = now;
-    if (!engine_FindObjC && !captured_script_engine) return;
-
-    for (person_index = 0;
-         person_index < BODY_PROFILE_PERSON_COUNT;
-         person_index++) {
-        int body_present = body_profile_runtime_person_body_present_a(person_index);
-        int best = -1;
-        int best_hits = 0;
-        int best_strong_hits = 0;
-        int tied = 0;
-        int exact_bound = body_profile_person_sidecar_active[person_index] &&
-                          body_profile_person_bind_strength[person_index] >= 2;
-        int active_hits = 0;
-        int active_strong_hits = 0;
-        int active_strong_total = 0;
-        int active_signature_count = 0;
-        if (!exact_bound && !defaults_cfg.debug) {
-            body_profile_runtime_miss_start_tick[person_index] = 0;
-            continue;
-        }
-
-        for (i = 0; i < BODY_PROFILE_SIDECAR_COUNT; i++) {
-            body_profile_sidecar_entry_t *entry = &body_profile_sidecars[i];
-            int sig;
-            int hits = 0;
-            int strong_total = 0;
-            int strong_hits = 0;
-            DWORD mask = 0;
-            if (!entry->active || entry->signature_count <= 0) continue;
-            for (sig = 0; sig < entry->signature_count &&
-                          sig < BODY_PROFILE_SIGNATURE_COUNT && sig < 32;
-                 sig++) {
-                char matched[192];
-                int generic = body_profile_signature_is_generic_a(
-                    entry->signature[sig]);
-                if (!generic) strong_total++;
-                if (!body_profile_runtime_signature_exists_a(
-                        person_index, entry->signature[sig],
-                        matched, sizeof(matched))) {
-                    continue;
-                }
-                hits++;
-                mask |= (1u << sig);
-                if (!generic) strong_hits++;
-                if (defaults_cfg.debug &&
-                    !(entry->person_signature_mask[person_index] &
-                      (1u << sig))) {
-                    entry->person_signature_mask[person_index] |= (1u << sig);
-                    log_line("body-profile runtime-hit person=\"Person%02d\" body_type=body%02d hit=\"%s\" hits=%d/%d sidecar=\"%s\" note=\"matching live PersonXXBody nodes against registered sidecar\"",
-                             person_index + 1, entry->body_slot + 1,
-                             matched, hits, entry->signature_count,
-                             entry->sidecar_path);
-                }
-            }
-
-            if (exact_bound &&
-                _stricmp(entry->sidecar_path,
-                         body_profile_person_sidecar_path[person_index]) == 0) {
-                active_hits = hits;
-                active_strong_hits = strong_hits;
-                active_strong_total = strong_total;
-                active_signature_count = entry->signature_count;
-            }
-
-            if (strong_total > 0) {
-                if (strong_hits <= 0) continue;
-            } else {
-                if (hits < BODY_PROFILE_SIGNATURE_MIN_HITS ||
-                    hits < entry->signature_count) {
-                    continue;
-                }
-            }
-
-            if (strong_hits > best_strong_hits ||
-                (strong_hits == best_strong_hits && hits > best_hits)) {
-                best = i;
-                best_hits = hits;
-                best_strong_hits = strong_hits;
-                tied = 0;
-            } else if (strong_hits == best_strong_hits && hits == best_hits) {
-                tied = 1;
-            }
-            (void)mask;
-        }
-
-        if (exact_bound) {
-            int active_matches = 0;
-            if (active_signature_count <= 0) {
-                active_matches = 1;
-            } else if (active_strong_total > 0) {
-                active_matches = active_strong_hits > 0;
-            } else {
-                active_matches =
-                    active_hits >= BODY_PROFILE_SIGNATURE_MIN_HITS &&
-                    active_hits >= active_signature_count;
-            }
-            if (active_matches || !body_present) {
-                body_profile_runtime_miss_start_tick[person_index] = 0;
-                body_profile_signature_ambiguity_logged[person_index] = 0;
-                body_profile_signature_ambiguity_hits[person_index] = 0;
-                continue;
-            }
-            best = -1;
-            tied = 0;
-        }
-
-        if (best >= 0 && !tied) {
-            body_profile_runtime_miss_start_tick[person_index] = 0;
-            body_profile_signature_ambiguity_logged[person_index] = 0;
-            body_profile_signature_ambiguity_hits[person_index] = 0;
-            if (body_profile_person_sidecar_active[person_index] &&
-                body_profile_person_bind_strength[person_index] < 2) {
-                body_profile_clear_person_sidecar_a(
-                    person_index, "signature-activation-disabled");
-            }
-        } else if (tied) {
-            body_profile_runtime_miss_start_tick[person_index] = 0;
-            if (defaults_cfg.debug &&
-                (!body_profile_signature_ambiguity_logged[person_index] ||
-                 body_profile_signature_ambiguity_hits[person_index] !=
-                     best_hits)) {
-                body_profile_signature_ambiguity_logged[person_index] = 1;
-                body_profile_signature_ambiguity_hits[person_index] =
-                    best_hits;
-                log_line("body-profile signature ambiguous person=\"Person%02d\" hits=%d note=\"more than one body sidecar matched live PersonXXBody signatures equally; keeping current/global config\"",
-                         person_index + 1, best_hits);
-            }
-        } else if (body_present &&
-                   body_profile_person_sidecar_active[person_index]) {
-            body_profile_signature_ambiguity_logged[person_index] = 0;
-            body_profile_signature_ambiguity_hits[person_index] = 0;
-            if (!body_profile_runtime_miss_start_tick[person_index]) {
-                body_profile_runtime_miss_start_tick[person_index] = now;
-            } else if (now - body_profile_runtime_miss_start_tick[person_index] >
-                       3000u) {
-                body_profile_runtime_miss_start_tick[person_index] = 0;
-                body_profile_clear_person_sidecar_a(
-                    person_index, "runtime-signature-miss");
-            }
-        } else {
-            body_profile_runtime_miss_start_tick[person_index] = 0;
-            body_profile_signature_ambiguity_logged[person_index] = 0;
-            body_profile_signature_ambiguity_hits[person_index] = 0;
-        }
-    }
-}
-
-static int body_profile_tail_matches_body_slot_a(const char *tail,
-                                                 int body_slot)
-{
-    char body_name[16];
-    if (!tail || body_slot < 0 || body_slot >= BODY_PROFILE_BODY_SLOT_COUNT) {
-        return 0;
-    }
-    wsprintfA(body_name, "body%02d", body_slot + 1);
-    return contains_i(tail, body_name);
-}
-
-static const char *body_profile_tail_leaf_a(const char *tail)
-{
-    const char *colon;
-    if (!tail) return "";
-    colon = strrchr(tail, ':');
-    return colon ? colon + 1 : tail;
-}
-
-static void body_profile_queue_pending_bind_a(int person_index,
+static int body_profile_queue_pending_bind_a(int person_index,
                                               int body_slot,
                                               DWORD now,
                                               const char *source)
@@ -1257,9 +893,16 @@ static void body_profile_queue_pending_bind_a(int person_index,
     DWORD oldest_tick = 0xffffffffu;
     if (person_index < 0 || person_index >= BODY_PROFILE_PERSON_COUNT ||
         body_slot < 0 || body_slot >= BODY_PROFILE_BODY_SLOT_COUNT) {
-        return;
+        return -1;
     }
     for (i = 0; i < BODY_PROFILE_PENDING_COUNT; i++) {
+        /* Hooks and log observers can report the same load. Keep one
+           outstanding request per person, never a stale FIFO duplicate. */
+        if (body_profile_pending_bind[i].active &&
+            body_profile_pending_bind[i].person_index == person_index) {
+            target = i;
+            break;
+        }
         if (!body_profile_pending_bind[i].active && target < 0) {
             target = i;
         }
@@ -1274,11 +917,13 @@ static void body_profile_queue_pending_bind_a(int person_index,
     body_profile_pending_bind[target].person_index = person_index;
     body_profile_pending_bind[target].body_slot = body_slot;
     body_profile_pending_bind[target].tick = now;
+    body_profile_pending_bind[target].selected_hash = 0;
     if (defaults_cfg.debug) {
         log_line("body-profile pending-bind person=\"Person%02d\" body_type=body%02d source=\"%s\" note=\"next exact loaded bodyXX.bs path for this body type binds the sidecar to this person\"",
                  person_index + 1, body_slot + 1,
                  source ? source : "bodyselect-marker");
     }
+    return target;
 }
 
 static int body_profile_bind_pending_open_slot_a(int person_index,
@@ -1318,22 +963,45 @@ static int body_profile_parse_virtual_body_scene_a(const char *path,
    Updated only by explicit per-person body scene loads, not UI selection intent. */
 static int body_profile_loaded_body_slot[4]={-1,-1,-1,-1};
 
+static body_profile_sidecar_entry_t *body_profile_find_sidecar_by_hash(
+    int body_slot, DWORD body_hash);
+
 static void body_profile_note_virtual_body_scene_a(const char *path,
                                                    const char *source)
 {
     int person_index;
     int body_slot;
+    int i;
+    DWORD now = GetTickCount();
+    body_profile_sidecar_entry_t *selected = NULL;
     if (!body_profile_parse_virtual_body_scene_a(path, &person_index,
                                                  &body_slot)) {
         return;
     }
+    /* A selection id identifies the add-on even when TK17 serves a cached
+       scene. Otherwise the new load must supply its own exact file path. */
+    for (i = 0; i < BODY_PROFILE_PENDING_COUNT; i++) {
+        body_profile_pending_bind_t *pending = &body_profile_pending_bind[i];
+        if (pending->active && pending->person_index == person_index &&
+            pending->body_slot == body_slot && now - pending->tick <= 8000u) {
+            selected = body_profile_find_sidecar_by_hash(
+                body_slot, pending->selected_hash);
+            break;
+        }
+    }
+    body_profile_clear_person_sidecar_a(person_index, "body-scene-replaced");
     body_profile_loaded_body_slot[person_index]=body_slot;
-    body_profile_signature_ambiguity_logged[person_index] = 0;
-    body_profile_signature_ambiguity_hits[person_index] = 0;
-    body_profile_queue_pending_bind_a(person_index, body_slot, GetTickCount(),
-                                      source ? source : "body-scene");
+    i = body_profile_queue_pending_bind_a(person_index, body_slot, now,
+                                          source ? source : "body-scene");
+    if (selected) {
+        body_profile_pending_bind[i].selected_hash = selected->body_hash;
+        body_profile_person_body_hash[person_index] = selected->body_hash;
+        body_profile_activate_sidecar_for_person_a(
+            person_index, body_slot, selected->body_path,
+            selected->sidecar_path, "body-scene-selection-id");
+    }
     body_profile_bind_pending_open_slot_a(person_index, body_slot,
-                                          GetTickCount(),
+                                          now,
                                           "body-file-open");
     log_line("body-profile body-scene person=\"Person%02d\" body=body%02d source=\"%s\" reason=\"%s\" note=\"TK17 virtual body load observed; waiting for exact add-on body path\"",
              person_index + 1, body_slot + 1, path,
@@ -1351,10 +1019,15 @@ static void body_profile_queue_pending_open_a(int body_slot,
     DWORD oldest_tick = 0xffffffffu;
     if (body_slot < 0 || body_slot >= BODY_PROFILE_BODY_SLOT_COUNT ||
         !body_path || !body_path[0] ||
-        !sidecar_path || !sidecar_path[0]) {
+        !sidecar_path) {
         return;
     }
     for (i = 0; i < BODY_PROFILE_PENDING_COUNT; i++) {
+        if (body_profile_pending_open[i].active &&
+            _stricmp(body_profile_pending_open[i].body_path, body_path) == 0) {
+            target = i;
+            break;
+        }
         if (!body_profile_pending_open[i].active && target < 0) {
             target = i;
         }
@@ -1374,44 +1047,6 @@ static void body_profile_queue_pending_open_a(int body_slot,
               sizeof(body_profile_pending_open[target].sidecar_path));
     log_line("body-profile sidecar pending-open body=\"%s\" body_type=body%02d sidecar=\"%s\" note=\"waiting for next matching PersonXXBody node; never applied globally\"",
              body_path, body_slot + 1, sidecar_path);
-}
-
-static int body_profile_bind_pending_open_a(int person_index,
-                                            const char *tail,
-                                            DWORD now)
-{
-    int i;
-    int best = -1;
-    DWORD best_tick = 0xffffffffu;
-    if (person_index < 0 || person_index >= BODY_PROFILE_PERSON_COUNT ||
-        !tail || !tail[0]) {
-        return 0;
-    }
-    for (i = 0; i < BODY_PROFILE_PENDING_COUNT; i++) {
-        body_profile_pending_open_t *pending = &body_profile_pending_open[i];
-        if (!pending->active) continue;
-        if (now - pending->tick > 3000u) {
-            pending->active = 0;
-            continue;
-        }
-        if (!body_profile_tail_matches_body_slot_a(tail, pending->body_slot)) {
-            continue;
-        }
-        if (pending->tick < best_tick) {
-            best_tick = pending->tick;
-            best = i;
-        }
-    }
-    if (best < 0) return 0;
-    body_profile_person_body_hash[person_index] = 0;
-    body_profile_activate_sidecar_for_person_a(
-        person_index,
-        body_profile_pending_open[best].body_slot,
-        body_profile_pending_open[best].body_path,
-        body_profile_pending_open[best].sidecar_path,
-        "body-file-open-tsnode");
-    body_profile_pending_open[best].active = 0;
-    return 1;
 }
 
 static int body_profile_bind_pending_open_slot_a(int person_index,
@@ -1435,6 +1070,10 @@ static int body_profile_bind_pending_open_slot_a(int person_index,
             continue;
         }
         if (pending->body_slot != body_slot) continue;
+        /* A known selection id outranks an unowned file-open candidate. */
+        if (body_profile_person_body_hash[person_index] &&
+            _stricmp(pending->body_path,
+                     body_profile_person_body_path[person_index]) != 0) continue;
         matches++;
         if (pending->tick < best_tick) {
             best_tick = pending->tick;
@@ -1449,24 +1088,44 @@ static int body_profile_bind_pending_open_slot_a(int person_index,
         return 0;
     }
     body_profile_person_body_hash[person_index] = 0;
-    body_profile_activate_sidecar_for_person_a(
-        person_index,
-        body_profile_pending_open[best].body_slot,
-        body_profile_pending_open[best].body_path,
-        body_profile_pending_open[best].sidecar_path,
-        reason ? reason : "bodyselect-pending");
+    if (body_profile_pending_open[best].sidecar_path[0]) {
+        body_profile_activate_sidecar_for_person_a(
+            person_index,
+            body_profile_pending_open[best].body_slot,
+            body_profile_pending_open[best].body_path,
+            body_profile_pending_open[best].sidecar_path,
+            reason ? reason : "bodyselect-pending");
+    } else {
+        body_profile_clear_person_sidecar_a(person_index, "body-file-no-sidecar");
+    }
     body_profile_pending_open[best].active = 0;
+    for (i = 0; i < BODY_PROFILE_PENDING_COUNT; i++) {
+        if (body_profile_pending_bind[i].person_index == person_index) {
+            body_profile_pending_bind[i].active = 0;
+        }
+    }
     return 1;
 }
 
 static void body_profile_note_tsnode_name_a(const char *name)
 {
     int person_index;
+    int slot;
     const char *tail;
     if (!body_profile_parse_person_body_tsnode_a(name, &person_index, &tail)) {
         return;
     }
-    body_profile_bind_pending_open_a(person_index, tail, GetTickCount());
+    /* Only the scene's source asset name supplies a body type here.
+       Never use morphs, mesh names, or arbitrary bodyXX substrings. */
+    for (slot = 0; slot < BODY_PROFILE_BODY_SLOT_COUNT; slot++) {
+        char asset[64];
+        wsprintfA(asset, "Shared/Body/body%02d.ma", slot + 1);
+        if (_stricmp(tail, asset) == 0) {
+            body_profile_bind_pending_open_slot_a(
+                person_index, slot, GetTickCount(), "body-file-open-tsnode");
+            return;
+        }
+    }
 }
 
 static body_profile_sidecar_entry_t *body_profile_find_sidecar_by_hash(
@@ -1593,12 +1252,9 @@ static void body_profile_register_sidecar_a(const char *sidecar_path)
     lstrcpynA(entry->addon_cname, cname, sizeof(entry->addon_cname));
     lstrcpynA(entry->body_path, body_path, sizeof(entry->body_path));
     lstrcpynA(entry->sidecar_path, sidecar_path, sizeof(entry->sidecar_path));
-    if (changed || entry->signature_count <= 0) {
-        body_profile_build_signatures_from_body_a(entry);
-    }
     if (changed) {
-        log_line("body-profile registry body_type=body%02d hash=%lu signatures=%d addon=\"%s\" body=\"%s\" sidecar=\"%s\" note=\"registered only; exact body-load binding activates sidecars; signatures are diagnostic only\"",
-                 slot + 1, (unsigned long)hash, entry->signature_count,
+        log_line("body-profile registry body_type=body%02d hash=%lu addon=\"%s\" body=\"%s\" sidecar=\"%s\" note=\"registered only; exact body paths and TK17 selection ids identify sidecars; no scene contents are inspected\"",
+                 slot + 1, (unsigned long)hash,
                  entry->addon_cname, entry->body_path, entry->sidecar_path);
     }
 }
@@ -1706,14 +1362,16 @@ static int body_profile_parse_body_select_marker_a(const char *path,
        Normal VX body selection uses LUA/VAR_personsel___<kind>|<gender>|<id>|<person>.
        The file is often virtual, so the CreateFile hook must parse it before the
        open result is known.  For add-on body sidecars we only bind direct numeric
-       body hashes; non-hash UI ids are logged and left to the PersonXXBody
-       fallback so one sidecar cannot bleed into unrelated bodies.
+       body hashes; non-hash UI ids wait for the exact loaded file path.
     */
     marker = strstr(path, "VAR_personsel___");
     if (!marker) return 0;
     person_text = marker + strlen("VAR_personsel___");
     bar = strchr(person_text, '|');
     if (!bar) return 0;
+    if (bar - person_text != 4 || _strnicmp(person_text, "body", 4) != 0) {
+        return 0;
+    }
     bar2 = strchr(bar + 1, '|');
     if (!bar2) return 0;
     bar3 = strchr(bar2 + 1, '|');
@@ -1737,6 +1395,7 @@ static void body_profile_note_body_select_marker_a(const char *path)
 {
     int person_index;
     int body_slot;
+    int pending;
     DWORD body_hash = 0;
     body_profile_sidecar_entry_t *entry;
     if (!body_profile_parse_body_select_marker_a(path, &person_index,
@@ -1746,48 +1405,32 @@ static void body_profile_note_body_select_marker_a(const char *path)
     if (body_hash) {
         entry = body_profile_find_sidecar_by_hash(body_slot, body_hash);
         if (entry) {
-            body_profile_queue_pending_bind_a(person_index, body_slot,
-                                              GetTickCount(),
-                                              "bodyselect-hash");
+            pending = body_profile_queue_pending_bind_a(
+                person_index, body_slot, GetTickCount(), "bodyselect-hash");
+            body_profile_pending_bind[pending].selected_hash = body_hash;
             body_profile_person_body_hash[person_index] = body_hash;
             body_profile_activate_sidecar_for_person_a(
                 person_index, body_slot, entry->body_path,
                 entry->sidecar_path, "bodyselect-hash");
             return;
         }
+        body_profile_clear_person_sidecar_a(person_index, "bodyselect-unregistered");
         body_profile_queue_pending_bind_a(person_index, body_slot,
                                           GetTickCount(),
                                           "bodyselect-hash-unmatched");
-        log_line("body-profile bodyselect hash-unmatched person=\"Person%02d\" body=body%02d hash=%lu source=\"%s\" note=\"no registered bodyXX.physx.ini matched this TK17 body id; waiting for body file or PersonXXBody fallback\"",
+        log_line("body-profile bodyselect hash-unmatched person=\"Person%02d\" body=body%02d hash=%lu source=\"%s\" note=\"no registered bodyXX.physx.ini matched this TK17 body id; waiting for exact body file\"",
                  person_index + 1, body_slot + 1,
                  (unsigned long)body_hash, path);
     } else {
+        body_profile_clear_person_sidecar_a(person_index, "bodyselect-awaiting-file");
         body_profile_queue_pending_bind_a(person_index, body_slot,
                                           GetTickCount(),
                                           "bodyselect-marker");
         if (defaults_cfg.debug) {
-            log_line("body-profile bodyselect marker person=\"Person%02d\" body=body%02d hash=0 source=\"%s\" note=\"TK17 marker did not carry a direct numeric body hash; waiting for body file or PersonXXBody fallback\"",
+            log_line("body-profile bodyselect marker person=\"Person%02d\" body=body%02d hash=0 source=\"%s\" note=\"TK17 marker did not carry a direct numeric body hash; waiting for exact body file\"",
                      person_index + 1, body_slot + 1, path);
         }
     }
-}
-
-static int body_profile_person_has_exact_sidecar_a(int body_slot,
-                                                   const char *body_path,
-                                                   const char *sidecar_path)
-{
-    int i;
-    if (!body_path || !sidecar_path) return 0;
-    for (i = 0; i < BODY_PROFILE_PERSON_COUNT; i++) {
-        if (body_profile_person_sidecar_active[i] &&
-            body_profile_person_bind_strength[i] >= 2 &&
-            _stricmp(body_profile_person_body_path[i], body_path) == 0 &&
-            _stricmp(body_profile_person_sidecar_path[i], sidecar_path) == 0) {
-            return 1;
-        }
-    }
-    (void)body_slot;
-    return 0;
 }
 
 static void body_profile_activate_sidecar_for_person_a(int person_index,
@@ -1813,15 +1456,6 @@ static void body_profile_activate_sidecar_for_person_a(int person_index,
                   sizeof(body_profile_person_sidecar_path[person_index]));
         body_profile_person_sidecar_active[person_index] = 1;
         changed = 1;
-    }
-    {
-        int strength = body_profile_bind_strength_from_reason_a(reason);
-        if (strength > body_profile_person_bind_strength[person_index]) {
-            body_profile_person_bind_strength[person_index] = strength;
-            changed = 1;
-        } else if (!body_profile_person_bind_strength[person_index]) {
-            body_profile_person_bind_strength[person_index] = strength;
-        }
     }
     if (get_file_write_time_a(sidecar_path, &wt)) {
         body_profile_person_sidecar_write_time[person_index] = wt;
@@ -1879,13 +1513,11 @@ static void body_profile_note_body_file_a(const char *body_path)
         body_profile_pending_bind[pending_index].active = 0;
     }
     if (person_index < 0) {
-        if (sidecar_exists &&
-            !body_profile_person_has_exact_sidecar_a(slot, body_path,
-                                                     sidecar)) {
-            body_profile_queue_pending_open_a(slot, body_path, sidecar, now);
-        }
+        body_profile_queue_pending_open_a(
+            slot, body_path, sidecar_exists ? sidecar : "", now);
         return;
     }
+    body_profile_person_body_hash[person_index] = 0;
     if (sidecar_exists) {
         body_profile_activate_sidecar_for_person_a(person_index, slot,
                                                    body_path, sidecar,
@@ -1896,7 +1528,6 @@ static void body_profile_note_body_file_a(const char *body_path)
         body_profile_person_sidecar_path[person_index][0] = 0;
         body_profile_person_body_path[person_index][0] = 0;
         body_profile_person_body_hash[person_index] = 0;
-        body_profile_person_bind_strength[person_index] = 0;
         memset(&body_profile_person_sidecar_write_time[person_index], 0,
                sizeof(body_profile_person_sidecar_write_time[person_index]));
         changed = 1;
@@ -2164,10 +1795,10 @@ static void migrate_legacy_penis_physics_section(void)
     char *section_values;
     DWORD count;
     size_t i;
-    GetPrivateProfileStringA(PENIS_PHYSICS_CONFIG_SECTION, "enabled", missing,
+    raw_profile_string_a(PENIS_PHYSICS_CONFIG_SECTION, "enabled", missing,
                              value, sizeof(value), config_path);
     if (strcmp(value, missing) != 0) return;
-    GetPrivateProfileStringA(PENIS_PHYSICS_LEGACY_CONFIG_SECTION, "enabled", missing,
+    raw_profile_string_a(PENIS_PHYSICS_LEGACY_CONFIG_SECTION, "enabled", missing,
                              value, sizeof(value), config_path);
     if (strcmp(value, missing) == 0) return;
     section_values = (char*)malloc(32768);
@@ -2178,7 +1809,7 @@ static void migrate_legacy_penis_physics_section(void)
         WritePrivateProfileSectionA(PENIS_PHYSICS_INTERNAL_CONFIG_SECTION,
                                     section_values, config_path)) {
         for (i = 0; i < sizeof(user_keys) / sizeof(user_keys[0]); i++) {
-            GetPrivateProfileStringA(PENIS_PHYSICS_LEGACY_CONFIG_SECTION,
+            raw_profile_string_a(PENIS_PHYSICS_LEGACY_CONFIG_SECTION,
                                      user_keys[i], missing,
                                      value, sizeof(value), config_path);
             if (strcmp(value, missing) != 0) {
@@ -2295,7 +1926,7 @@ static void profile_paired_angle_settings(const char *section, const char *path,
     int min_present = profile_string_found(section, min_key, value, sizeof(value), path);
     if (!overlay || max_present)
         profile_vec3_or_float(section, max_key, cfg->max_angle, cfg->link_max_angle[0], path);
-    if (!overlay || max_present || min_present)
+    if (!overlay || min_present)
         profile_min_angle_vec3_or_float(section, min_key, cfg->link_max_angle[0],
                                         cfg->link_min_angle[0], path);
     cfg->link_gain[0] = profile_float(section, gain_key, overlay ? cfg->link_gain[0] : 1.0f, path);
@@ -2595,30 +2226,36 @@ static void body_profile_overlay_body_physics_sections(int person_index,
     body_chain_physics_cfg.max_angle =
         profile_float(PENIS_PHYSICS_CONFIG_SECTION, "max_angle",
                       body_chain_physics_cfg.max_angle, path);
-    profile_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION, "joint01_max_angle",
-                          body_chain_physics_cfg.max_angle,
-                          body_chain_physics_cfg.link_max_angle[0], path);
-    profile_min_angle_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION,
-                                    "joint01_min_angle",
-                                    body_chain_physics_cfg.link_max_angle[0],
-                                    body_chain_physics_cfg.link_min_angle[0],
-                                    path);
-    profile_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION, "joint02_max_angle",
-                          body_chain_physics_cfg.max_angle,
-                          body_chain_physics_cfg.link_max_angle[1], path);
-    profile_min_angle_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION,
-                                    "joint02_min_angle",
-                                    body_chain_physics_cfg.link_max_angle[1],
-                                    body_chain_physics_cfg.link_min_angle[1],
-                                    path);
-    profile_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION, "joint03_max_angle",
-                          body_chain_physics_cfg.max_angle,
-                          body_chain_physics_cfg.link_max_angle[2], path);
-    profile_min_angle_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION,
-                                    "joint03_min_angle",
-                                    body_chain_physics_cfg.link_max_angle[2],
-                                    body_chain_physics_cfg.link_min_angle[2],
-                                    path);
+    if (raw_profile_key_exists_a(PENIS_PHYSICS_CONFIG_SECTION, "joint01_max_angle", path))
+        profile_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION, "joint01_max_angle",
+                              body_chain_physics_cfg.max_angle,
+                              body_chain_physics_cfg.link_max_angle[0], path);
+    if (raw_profile_key_exists_a(PENIS_PHYSICS_CONFIG_SECTION, "joint01_min_angle", path))
+        profile_min_angle_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION,
+                                        "joint01_min_angle",
+                                        body_chain_physics_cfg.link_max_angle[0],
+                                        body_chain_physics_cfg.link_min_angle[0],
+                                        path);
+    if (raw_profile_key_exists_a(PENIS_PHYSICS_CONFIG_SECTION, "joint02_max_angle", path))
+        profile_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION, "joint02_max_angle",
+                              body_chain_physics_cfg.max_angle,
+                              body_chain_physics_cfg.link_max_angle[1], path);
+    if (raw_profile_key_exists_a(PENIS_PHYSICS_CONFIG_SECTION, "joint02_min_angle", path))
+        profile_min_angle_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION,
+                                        "joint02_min_angle",
+                                        body_chain_physics_cfg.link_max_angle[1],
+                                        body_chain_physics_cfg.link_min_angle[1],
+                                        path);
+    if (raw_profile_key_exists_a(PENIS_PHYSICS_CONFIG_SECTION, "joint03_max_angle", path))
+        profile_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION, "joint03_max_angle",
+                              body_chain_physics_cfg.max_angle,
+                              body_chain_physics_cfg.link_max_angle[2], path);
+    if (raw_profile_key_exists_a(PENIS_PHYSICS_CONFIG_SECTION, "joint03_min_angle", path))
+        profile_min_angle_vec3_or_float(PENIS_PHYSICS_CONFIG_SECTION,
+                                        "joint03_min_angle",
+                                        body_chain_physics_cfg.link_max_angle[2],
+                                        body_chain_physics_cfg.link_min_angle[2],
+                                        path);
     body_chain_physics_cfg.link_gain[0] =
         profile_float(PENIS_PHYSICS_CONFIG_SECTION, "joint01_gain",
                       body_chain_physics_cfg.link_gain[0], path);
@@ -2730,24 +2367,28 @@ static void body_profile_overlay_body_physics_sections(int person_index,
                                         .gravity_vertical_curve,
                                     path),
                       path);
-    profile_vec3_or_float(TESTICLE_PHYSICS_CONFIG_SECTION,
-                          "joint01_max_angle",
-                          testicle_physics_cfg.max_angle,
-                          testicle_physics_cfg.link_max_angle[0], path);
-    profile_min_angle_vec3_or_float(TESTICLE_PHYSICS_CONFIG_SECTION,
-                                    "joint01_min_angle",
-                                    testicle_physics_cfg.link_max_angle[0],
-                                    testicle_physics_cfg.link_min_angle[0],
-                                    path);
-    profile_vec3_or_float(TESTICLE_PHYSICS_CONFIG_SECTION,
-                          "joint02_max_angle",
-                          testicle_physics_cfg.max_angle,
-                          testicle_physics_cfg.link_max_angle[1], path);
-    profile_min_angle_vec3_or_float(TESTICLE_PHYSICS_CONFIG_SECTION,
-                                    "joint02_min_angle",
-                                    testicle_physics_cfg.link_max_angle[1],
-                                    testicle_physics_cfg.link_min_angle[1],
-                                    path);
+    if (raw_profile_key_exists_a(TESTICLE_PHYSICS_CONFIG_SECTION, "joint01_max_angle", path))
+        profile_vec3_or_float(TESTICLE_PHYSICS_CONFIG_SECTION,
+                              "joint01_max_angle",
+                              testicle_physics_cfg.max_angle,
+                              testicle_physics_cfg.link_max_angle[0], path);
+    if (raw_profile_key_exists_a(TESTICLE_PHYSICS_CONFIG_SECTION, "joint01_min_angle", path))
+        profile_min_angle_vec3_or_float(TESTICLE_PHYSICS_CONFIG_SECTION,
+                                        "joint01_min_angle",
+                                        testicle_physics_cfg.link_max_angle[0],
+                                        testicle_physics_cfg.link_min_angle[0],
+                                        path);
+    if (raw_profile_key_exists_a(TESTICLE_PHYSICS_CONFIG_SECTION, "joint02_max_angle", path))
+        profile_vec3_or_float(TESTICLE_PHYSICS_CONFIG_SECTION,
+                              "joint02_max_angle",
+                              testicle_physics_cfg.max_angle,
+                              testicle_physics_cfg.link_max_angle[1], path);
+    if (raw_profile_key_exists_a(TESTICLE_PHYSICS_CONFIG_SECTION, "joint02_min_angle", path))
+        profile_min_angle_vec3_or_float(TESTICLE_PHYSICS_CONFIG_SECTION,
+                                        "joint02_min_angle",
+                                        testicle_physics_cfg.link_max_angle[1],
+                                        testicle_physics_cfg.link_min_angle[1],
+                                        path);
     testicle_physics_cfg.link_gain[0] =
         profile_float(TESTICLE_PHYSICS_CONFIG_SECTION, "joint01_gain",
                       testicle_physics_cfg.link_gain[0], path);
@@ -2776,6 +2417,7 @@ static void body_profile_overlay_body_collider_section(const char *path)
     char buf[512];
     int i;
     if (!path || !path[0]) return;
+    body_collider_debug_profile(path, 1);
 
     body_colliders_profile_string("testicles01_fine_offset", "",
                                   buf, sizeof(buf), path);
@@ -3001,9 +2643,7 @@ static void body_profile_overlay_body_collider_section(const char *path)
     body_chain_collider_cfg.response_radius_scale =
         body_colliders_profile_float("response_radius_scale",
                       body_chain_collider_cfg.response_radius_scale, path);
-    body_chain_collider_cfg.chain_radius =
-        body_colliders_profile_float("chain_radius",
-                      body_chain_collider_cfg.chain_radius, path);
+    body_penis_profile(path, 1);
     body_chain_collider_cfg.link_length[0] =
         body_colliders_profile_float("joint01_link_length",
                       body_chain_collider_cfg.link_length[0], path);
@@ -3114,7 +2754,7 @@ static int physx_toggle_person_ini_setting(const char *section,
     new_enabled = currently_enabled ? 0 : 1;
     if (!WritePrivateProfileStringA(section, key,
                                     new_enabled ? "true" : "false",
-                                    config_path)) {
+                                    physx_settings_write_path(section))) {
         log_line("settings write failed source=person-context action=%s person=Person%02d ini=[%s] %s path=\"%s\"",
                  kind, person_index + 1, section, key, config_path);
         return 0;
@@ -3154,7 +2794,7 @@ static void body_profile_rebuild_effective_configs(void)
                 body_profile_person_sidecar_path[person_index]);
             body_profile_overlay_body_collider_section(
                 body_profile_person_sidecar_path[person_index]);
-            log_line("body-profile effective person=\"Person%02d\" sidecar=\"%s\" body=\"%s\" breasts_physics=%d breasts_person=%d breasts_collision=%d breasts_scope=%s butt_physics=%d butt_person=%d butt_collision=%d butt_scope=%s penis_physics=%d penis_person=%d penis_collision=%d penis_scope=%s testicle_physics=%d testicle_person=%d testicle_collision=%d testicle_scope=%s body_colliders=%d note=\"global fallback copied first; sidecar overlaid for this person only\"",
+            log_line("body-profile effective person=\"Person%02d\" sidecar=\"%s\" body=\"%s\" breasts_physics=%d breasts_person=%d breasts_collision=%d breasts_scope=%s butt_physics=%d butt_person=%d butt_collision=%d butt_scope=%s penis_physics=%d penis_person=%d penis_collision=%d penis_scope=%s testicle_physics=%d testicle_person=%d testicle_collision=%d testicle_scope=%s body_colliders=%d note=\"global/preset fallback copied first; sidecar overlaid for this person only\"",
                      person_index + 1,
                      body_profile_person_sidecar_path[person_index],
                      body_profile_person_body_path[person_index],
@@ -3186,6 +2826,7 @@ static void body_profile_rebuild_effective_configs(void)
         }
     }
     body_profile_set_active_person_config(-1);
+    person_context_refresh_physx_labels();
 }
 
 static void handle_physx_settings_change(const char *param_ref,
@@ -3199,6 +2840,10 @@ static void handle_physx_settings_change(const char *param_ref,
     if (physx_settings_sync_depth || !param_name || _strnicmp(param_name, "NCPhysX", 7) != 0) return;
     if (!config_path[0]) config_file_path(config_path, sizeof(config_path));
     migrate_legacy_penis_physics_section();
+    if (!strcmp(param_name, "NCPhysXPresets")) {
+        if (physx_preset_select(string_value)) physx_sync_controls(physx_settings_customizer);
+        return;
+    }
     for (i = 0; i < sizeof(physx_settings_bindings) / sizeof(physx_settings_bindings[0]); i++) {
         const physx_settings_binding_t *binding = &physx_settings_bindings[i];
         if (strcmp(param_name, binding->param_name) != 0) continue;
@@ -3214,7 +2859,7 @@ static void handle_physx_settings_change(const char *param_ref,
                 return;
             }
             if (WritePrivateProfileStringA(binding->section, binding->key,
-                                           collision_scope, config_path)) {
+                                           collision_scope, physx_settings_write_path(binding->section))) {
                 log_line("settings changed param=\"%s\" value=%s ini=[%s] %s note=\"normal INI hot-reload scheduled\"",
                          param_name, collision_scope,
                          binding->section, binding->key);
@@ -3231,7 +2876,7 @@ static void handle_physx_settings_change(const char *param_ref,
         }
         if (WritePrivateProfileStringA(binding->section, binding->key,
                                        enabled ? "true" : "false",
-                                       config_path)) {
+                                       physx_settings_write_path(binding->section))) {
             if (strcmp(binding->section, PENIS_PHYSICS_CONFIG_SECTION) == 0) {
                 physx_mark_penis_physics_setting_change(binding->key, enabled);
             } else if (strcmp(binding->section,
@@ -3617,6 +3262,8 @@ static void load_global_config(void)
     int hot_reload = config_loaded;
     restore_collision_auto_test_active();
     config_file_path(config_path, sizeof(config_path));
+    physx_preset_reset_physics_defaults();
+    physx_preset_load_selection();
     defaults_cfg.stiffness = profile_float("defaults", "stiffness", defaults_cfg.stiffness, config_path);
     defaults_cfg.damping = profile_float("defaults", "damping", defaults_cfg.damping, config_path);
     defaults_cfg.limit_angle = profile_float("defaults", "limit_angle", defaults_cfg.limit_angle, config_path);
@@ -5645,9 +5292,7 @@ static void load_global_config(void)
     body_chain_collider_cfg.enabled =
         body_colliders_profile_bool("enabled",
                      body_chain_collider_cfg.enabled, config_path);
-    body_chain_collider_cfg.debug_draw =
-        body_colliders_profile_bool("debug_draw",
-                     body_chain_collider_cfg.debug_draw, config_path);
+    body_collider_debug_profile(config_path, 0);
     body_chain_collider_cfg.response_enabled =
         body_colliders_profile_bool("response_enabled",
                      body_chain_collider_cfg.response_enabled, config_path);
@@ -6001,9 +5646,7 @@ static void load_global_config(void)
     body_chain_collider_cfg.response_radius_scale =
         body_colliders_profile_float("response_radius_scale",
                       body_chain_collider_cfg.response_radius_scale, config_path);
-    body_chain_collider_cfg.chain_radius =
-        body_colliders_profile_float("chain_radius",
-                      body_chain_collider_cfg.chain_radius, config_path);
+    body_penis_profile(config_path, 0);
     body_chain_collider_cfg.link_length[0] =
         body_colliders_profile_float("joint01_link_length",
                       body_chain_collider_cfg.link_length[0], config_path);
@@ -6440,7 +6083,7 @@ static void refresh_global_config(DWORD now)
         return;
     }
     if (InterlockedExchange(&body_profile_reload_pending, 0)) {
-        log_line("body-profile reload note=\"person-bound body sidecar changed; rebuilding global fallback plus per-person effective configs\"");
+        log_line("body-profile reload note=\"preset selection or person-bound sidecar changed; rebuilding effective configs\"");
         load_global_config();
         return;
     }
@@ -6450,6 +6093,11 @@ static void refresh_global_config(DWORD now)
         return;
     }
     last_poll_tick = now;
+    if (physx_preset_reload_due(now)) {
+        log_line("preset changed; rebuilding physics settings");
+        load_global_config();
+        return;
+    }
     for (slot = 0; slot < 4; slot++) {
         FILETIME sidecar_wt;
         if (!body_profile_person_sidecar_active[slot]) continue;
@@ -6461,7 +6109,6 @@ static void refresh_global_config(DWORD now)
             body_profile_person_sidecar_path[slot][0] = 0;
             body_profile_person_body_path[slot][0] = 0;
             body_profile_person_body_hash[slot] = 0;
-            body_profile_person_bind_strength[slot] = 0;
             load_global_config();
             return;
         }

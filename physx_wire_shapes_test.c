@@ -12,6 +12,7 @@ int main(void)
         body_chain_hook5_projection._33=body_chain_hook5_projection._44=1;
     body_chain_collider_person_cfg[0].enabled=1;
     body_chain_collider_person_cfg[0].debug_draw=1;
+    body_chain_collider_person_cfg[0].debug_draw_capsules=1;
     body_chain_collider_person_cfg[0].response_radius_scale=2;
     body_chain_collider_person_cfg[0].chain_radius=0.05f;
     body_chain_collider_person_cfg[0].node_radius[BODY_COLLIDER_BREAST_L][0]=0.1f;

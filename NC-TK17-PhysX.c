@@ -26,6 +26,12 @@
    Config.ini from optional body-sidecar INI files. */
 static char config_path[MAX_PATH * 4];
 
+static DWORD raw_profile_string_a(const char *section, const char *key,
+    const char *fallback, char *out, DWORD size, const char *path)
+{
+    return GetPrivateProfileStringA(section, key, fallback, out, size, path);
+}
+
 static int raw_profile_key_exists_a(const char *section, const char *key,
                                     const char *path)
 {
@@ -39,15 +45,13 @@ static int raw_profile_key_exists_a(const char *section, const char *key,
 #define BODY_PROFILE_BODY_SLOT_COUNT 3
 #define BODY_PROFILE_PENDING_COUNT 8
 #define BODY_PROFILE_SIDECAR_COUNT 64
-#define BODY_PROFILE_SIGNATURE_COUNT 16
-#define BODY_PROFILE_SIGNATURE_LEN 96
-#define BODY_PROFILE_SIGNATURE_MIN_HITS 3
 
 typedef struct body_profile_pending_bind_t {
     int active;
     int person_index;
     int body_slot;
     DWORD tick;
+    DWORD selected_hash;
 } body_profile_pending_bind_t;
 
 typedef struct body_profile_pending_open_t {
@@ -65,9 +69,6 @@ typedef struct body_profile_sidecar_entry_t {
     char addon_cname[160];
     char body_path[MAX_PATH * 4];
     char sidecar_path[MAX_PATH * 4];
-    char signature[BODY_PROFILE_SIGNATURE_COUNT][BODY_PROFILE_SIGNATURE_LEN];
-    int signature_count;
-    DWORD person_signature_mask[BODY_PROFILE_PERSON_COUNT];
 } body_profile_sidecar_entry_t;
 
 static char body_profile_person_sidecar_path[BODY_PROFILE_PERSON_COUNT][MAX_PATH * 4];
@@ -75,7 +76,6 @@ static char body_profile_person_body_path[BODY_PROFILE_PERSON_COUNT][MAX_PATH * 
 static FILETIME body_profile_person_sidecar_write_time[BODY_PROFILE_PERSON_COUNT];
 static int body_profile_person_sidecar_active[BODY_PROFILE_PERSON_COUNT];
 static DWORD body_profile_person_body_hash[BODY_PROFILE_PERSON_COUNT];
-static int body_profile_person_bind_strength[BODY_PROFILE_PERSON_COUNT];
 static body_profile_pending_bind_t body_profile_pending_bind[BODY_PROFILE_PENDING_COUNT];
 static body_profile_pending_open_t body_profile_pending_open[BODY_PROFILE_PENDING_COUNT];
 static body_profile_sidecar_entry_t body_profile_sidecars[BODY_PROFILE_SIDECAR_COUNT];
@@ -140,6 +140,8 @@ static int body_profile_is_global_config_path_a(const char *path)
     return path && config_path[0] && _stricmp(path, config_path) == 0;
 }
 
+#include "physx_preset_profile.c"
+
 static int body_profile_section_allowed_a(const char *section)
 {
     if (!section) return 0;
@@ -193,6 +195,10 @@ static DWORD WINAPI physx_get_private_profile_string_a(const char *section,
 {
     const char *resolved = resolve_profile_section_a(section, key, path);
     const char *read_path = body_profile_override_path_a(resolved, key, path);
+    const char *preset_key = body_profile_is_global_config_path_a(path)
+        ? physx_preset_key(resolved, key) : NULL;
+    if (preset_key) return GetPrivateProfileStringA(resolved, preset_key, fallback,
+        out, out_size, physx_preset_path);
     return GetPrivateProfileStringA(resolved, key, fallback, out, out_size,
                                     read_path);
 }
@@ -204,6 +210,9 @@ static UINT WINAPI physx_get_private_profile_int_a(const char *section,
 {
     const char *resolved = resolve_profile_section_a(section, key, path);
     const char *read_path = body_profile_override_path_a(resolved, key, path);
+    const char *preset_key = body_profile_is_global_config_path_a(path)
+        ? physx_preset_key(resolved, key) : NULL;
+    if (preset_key) return GetPrivateProfileIntA(resolved, preset_key, fallback, physx_preset_path);
     return GetPrivateProfileIntA(resolved, key, fallback, read_path);
 }
 
@@ -264,6 +273,8 @@ typedef int (THISCALL *script_index_count_property_t)(void *, DWORD);
 typedef unsigned int (THISCALL *tbase_get_matrix_version_t)(void *);
 typedef void (THISCALL *tbase_set_matrix_version_t)(void *, unsigned int);
 typedef void (THISCALL *poseedit_update_objects_from_tracks_t)(void *);
+typedef DWORD (THISCALL *poseedit_queue_pose_t)(void *, void *, void *, void *);
+typedef BYTE (THISCALL *pose_fade_ready_t)(void *, void *, void *);
 typedef unsigned char (THISCALL *poseedit_track_evaluate_t)(void *, float *, double);
 typedef void (THISCALL *poseedit_track_update_t)(void *, double);
 typedef void (__cdecl *update_traverse_t)(void *, const float *, unsigned int);
@@ -279,6 +290,7 @@ static void restore_poseedit_inittracks_hook(void);
 static void patch_config_editor_param_change(void);
 static void patch_config_editor_spinbox_sync(void);
 static void patch_person_context_rebuild(void);
+static void person_context_refresh_physx_labels(void);
 static void patch_app_main_command(void);
 static void patch_runtime_animation_member_setters(void);
 static void restore_runtime_animation_member_setters(void);
@@ -317,6 +329,11 @@ static void *__cdecl hook_CloneNode(void *source, void *clone_map);
 static void __cdecl hook_UpdateTraverse(void *object, const float *matrix, unsigned int flags);
 static DWORD THISCALL hook_AppBase_ProcessAnimation(void *self);
 static void THISCALL hook_PoseEdit_UpdateObjectsFromTracks(void *self);
+static void THISCALL hook_PoseEdit_ResetPose(void *self);
+static DWORD THISCALL hook_PoseEdit_QueuePose(void *self, void *pose, void *animation, void *options);
+static BYTE THISCALL hook_PoseFade_Ready(void *self, void *arg0, void *arg1);
+static int physx_poseedit_transition_busy(void);
+static void physx_poseedit_trace_rotations(const char *phase, unsigned int persons);
 static void THISCALL hook_RuntimeRotationVectorWrite(
     void *self, const float *value);
 static void THISCALL hook_RuntimeJointRotationAxisWrite(
@@ -341,8 +358,16 @@ static const char *body_chain_collider_node_label(int node_index);
 #define POSEEDITOR_VISIBILITY_EXIT_DEBOUNCE_MS 6500u
 #define POSEEDIT_INITTRACKS_PATCH_ADDR ((BYTE*)0x004CE710)
 #define POSEEDIT_UPDATE_OBJECTS_FROM_TRACKS_ADDR ((BYTE*)0x004CC760)
+#define POSEEDIT_RESET_POSE_ADDR ((BYTE*)0x004C8090)
+#define POSEEDIT_QUEUE_POSE_ADDR ((BYTE*)0x004E6E90)
+#define POSE_FADE_READY_ADDR ((BYTE*)0x005FB200)
+#define POSEEDIT_RESET_PENDING_OFFSET 0x1b8
+#ifndef POSEEDIT_TRACK_EVALUATE_ADDR
 #define POSEEDIT_TRACK_EVALUATE_ADDR ((BYTE*)0x004F1B10)
+#endif
+#ifndef POSEEDIT_TRACK_UPDATE_ADDR
 #define POSEEDIT_TRACK_UPDATE_ADDR ((BYTE*)0x004F19E0)
+#endif
 #define POSEEDIT_CURRENT_FRAME_OFFSET 0x1F4
 #define POSEEDIT_PERSON_MODULE_OFFSET 0x028
 #define POSEEDIT_SCENE_CONTEXT_OFFSET 0x028
@@ -642,6 +667,11 @@ typedef enum physx_perf_phase_t {
     PHYSX_PERF_ADDON_BODY_COLLISION,
     PHYSX_PERF_ADDON_SELF_COLLISION,
     PHYSX_PERF_ADDON_ADDONS_COLLISION,
+    PHYSX_PERF_SYMBOL_RESOLUTION,
+    PHYSX_PERF_FIND_OBJECT,
+    PHYSX_PERF_SCRIPT_FIND_OBJECT,
+    PHYSX_PERF_AXIS_LOOKUP,
+    PHYSX_PERF_PIVOT_QUERY,
     PHYSX_PERF_TOTAL,
     PHYSX_PERF_PHASE_COUNT
 } physx_perf_phase_t;
@@ -947,6 +977,10 @@ typedef struct physics_environment_config_t {
 typedef struct body_chain_collider_config_t {
     int enabled;
     int debug_draw;
+    int debug_draw_capsules;
+    int debug_draw_filtered;
+    int debug_draw_chain;
+    unsigned char debug_draw_nodes[BODY_COLLIDER_NODE_COUNT];
     int response_enabled;
     int breasts_collision_enabled;
     int butt_collision_enabled;
@@ -1005,7 +1039,9 @@ typedef struct body_chain_collider_config_t {
     float node_fine_offset[BODY_COLLIDER_NODE_COUNT][3];
     float pelvis_capsule_radius;
     float response_radius_scale;
-    float chain_radius;
+    float chain_radius; /* Shared collision thickness; legacy field name. */
+    float penis_radius;
+    float penis_fine_offset[3][3];
     float link_length[3];
     float response_strength;
     float response_max_degrees_per_tick;
@@ -1120,7 +1156,7 @@ typedef struct body_chain_person_state_t {
     int gravity_basis_sampled;
     float gravity_basis_prev[3];
     int gravity_camera_hold_active;
-    gravity_sample_t gravity_sample, geometry_sample;
+    gravity_sample_t gravity_sample, geometry_sample, gravity_reference_sample;
     LONG gravity_probe_candidate_camera_version;
     int gravity_probe_reactivation_ready;
     DWORD gravity_probe_reactivation_tick;
@@ -1137,6 +1173,8 @@ typedef struct body_chain_person_state_t {
     LONG live_ownership_node_generation;
     DWORD ownership_candidate_tick;
     int clothing_resume_pending;
+    int pose_load_resume_pending;
+    int activation_resume_pending;
     int clothing_resume_pose_valid;
     float clothing_resume_base_rest[3][3];
     int clothing_resume_skeleton_valid;
@@ -1175,6 +1213,8 @@ typedef struct body_chain_person_state_t {
     float pose_compensation[3][3];
     int pose_compensation_valid;
     int pose_compensation_logged;
+    float pose_start_rotation[2][3];
+    float pose_start_weight;
     float joint01_pose_rest[BODY_CHAIN_ANIM_OVERRIDE_MAX_OFFSETS][3];
     int joint01_pose_rest_valid;
     int joint01_transform_lock_logged;
@@ -1276,13 +1316,15 @@ typedef struct breasts_physics_person_state_t {
        probe state prevents the spine's rotated local basis from swapping
        the established prone/supine and left/right gravity channels. */
     body_chain_person_state_t gravity_motion;
-    gravity_sample_t spine_gravity_sample;
+    gravity_sample_t spine_gravity_sample, spine_gravity_reference_sample;
     void *source_joint_raw[2];
     void *animation_joint_raw[2];
     void *translation_parent_joint_raw[2];
     float source_handoff[2][3];
     float source_translation_handoff[2][3];
     float rest_rotation[2][3];
+    float activation_base_rest[2][3];
+    int activation_rest_pending;
     float rotation[2][3];
     float angular_velocity[2][3];
     float bone_translation[2][3];
@@ -1482,6 +1524,7 @@ static void reset_body_chain_gravity_state(body_chain_person_state_t *state)
     state->gravity_probe_world_valid = 0;
     reset_body_chain_gravity_basis_gate(state);
     memset(&state->gravity_sample, 0, sizeof(state->gravity_sample));
+    memset(&state->gravity_reference_sample, 0, sizeof(state->gravity_reference_sample));
     memset(&state->geometry_sample, 0, sizeof(state->geometry_sample));
 }
 
@@ -1775,6 +1818,7 @@ typedef struct physx_chain_t {
     float addon_gravity_trusted_drive[3];
     int addon_gravity_trusted_valid;
     gravity_sample_t addon_gravity_sample;
+    gravity_sample_t addon_gravity_reference_sample;
     int addon_gravity_camera_hold_active;
     int addon_gravity_camera_release_active;
     DWORD addon_gravity_camera_log_tick;
@@ -1888,6 +1932,13 @@ typedef struct physx_chain_t {
     int addon_root_window_serial;
     DWORD addon_root_seen_tick;
     DWORD addon_root_settle_until_tick;
+    DWORD customizer_ready_tick;
+    DWORD customizer_sample_tick;
+    unsigned int customizer_ready_samples;
+    void *customizer_owner_raw;
+    void *customizer_target_objects[32];
+    void *customizer_target_bases[32];
+    float customizer_target_matrices[32][12];
     int addon_live_layout_pending;
     DWORD addon_live_layout_retry_tick;
     int addon_scene_visible;
@@ -2025,6 +2076,16 @@ static volatile LONG body_chain_traverse_overlay_active;
 static volatile LONG body_chain_runtime_penis_native_filter_active;
 static volatile LONG body_chain_poseeditor_mode_active;
 static volatile LONG body_chain_runtime_mode_transition_pending;
+static int physx_customizer_active;
+static int physx_customizer_entry_pending;
+static DWORD physx_customizer_entry_tick;
+
+/* Faster discovery is bounded to entry; normal idle polling stays cheap. */
+static int physx_customizer_startup_active(DWORD now)
+{
+    return physx_customizer_active &&
+           now - physx_customizer_entry_tick < 3000u;
+}
 static DWORD body_chain_poseeditor_mode_probe_tick;
 static DWORD body_chain_poseeditor_mode_probe_unavailable_log_tick;
 static DWORD body_chain_poseeditor_exit_candidate_tick;
@@ -2439,6 +2500,7 @@ static float butt_physics_bone_translation_sign[2][3] = {
 static body_chain_collider_config_t body_chain_collider_global_cfg = {
     .enabled = 0,
     .debug_draw = 1,
+    .debug_draw_capsules = 1,
     .response_enabled = 0,
     .breasts_collision_enabled = 0,
     .butt_collision_enabled = 0,
@@ -2523,6 +2585,7 @@ static body_chain_collider_config_t body_chain_collider_global_cfg = {
     .pelvis_capsule_radius = 0.10f,
     .response_radius_scale = 0.35f,
     .chain_radius = 0.018f,
+    .penis_radius = 0.018f,
     .link_length = { 0.070f, 0.060f, 0.055f },
     .response_strength = 1.00f,
     .response_max_degrees_per_tick = 6.0f,
@@ -2616,6 +2679,15 @@ static int body_chain_collision_scope_valid(int scope)
 static int body_chain_collision_scope_all_persons(int scope)
 {
     return body_chain_collision_scope_valid(scope) && (scope & 1) != 0;
+}
+
+static int body_collision_person_allowed(int owner, int collider)
+{
+    /* Customizer displays one person, but other room actors can retain
+       nonzero transforms and PersonVisible=true. Those stale actors must
+       not push the displayed body while waiting for camera traversal to
+       invalidate them. Keep self contacts and the configured room scopes. */
+    return !physx_customizer_active || owner == collider;
 }
 
 static int body_chain_collision_scope_collider_mask(int scope)
@@ -3334,8 +3406,14 @@ static DWORD physx_simulation_serial;
 /* Animation-phase reveal preparation shares the solver's configuration and
    scratch data. Never enter it recursively from native ownership handoff. */
 static volatile LONG physx_physics_phase_busy;
+static int physx_shutting_down;
 static unsigned int physx_genital_early_attempted[2];
 static int physx_genital_early_sample_done;
+static int poseedit_file_command_depth;
+static void *poseedit_fade_cleanup_editor;
+/* A restart request only: never carry output, velocity or tracks across poses. */
+static unsigned int poseedit_penis_resume_mask;
+static void *poseedit_penis_resume_editor;
 static uint64_t body_update_frame_us;
 static int body_update_precise_frame;
 
@@ -3410,6 +3488,10 @@ static appbase_process_animation_t real_AppBase_ProcessAnimation;
 static appbase_process_animation_t tramp_AppBase_ProcessAnimation;
 static poseedit_update_objects_from_tracks_t
     tramp_PoseEdit_UpdateObjectsFromTracks;
+static poseedit_update_objects_from_tracks_t tramp_PoseEdit_ResetPose;
+static poseedit_queue_pose_t tramp_PoseEdit_QueuePose;
+static pose_fade_ready_t tramp_PoseFade_Ready;
+static int poseedit_reset_hook_attempted;
 static runtime_rotation_vector_write_t real_RuntimeRotationVectorWrite;
 static runtime_rotation_vector_write_t tramp_RuntimeRotationVectorWrite;
 static int runtime_rotation_vector_write_hook_logged;
@@ -3508,10 +3590,38 @@ typedef struct runtime_exact_root_hint_t {
     DWORD hash;
     LONG generation;
     int root_index;
+    unsigned int miss_scope;
+    LONG miss_mutation;
+    void *miss_script_engine;
     char name[RUNTIME_EXACT_ROOT_HINT_NAME];
 } runtime_exact_root_hint_t;
 static __thread runtime_exact_root_hint_t
     runtime_exact_root_hints[RUNTIME_EXACT_ROOT_HINT_SLOTS];
+/* Cache only failed fallback searches within one synchronous physics update.
+   Direct engine lookups still run first; successful hints always re-resolve.
+   Never retain misses across frames or native name/scene mutations. */
+static __thread unsigned int runtime_exact_lookup_scope;
+static __thread int runtime_exact_lookup_scope_active;
+static volatile LONG runtime_exact_lookup_mutation = 1;
+
+static void runtime_exact_lookup_invalidate(void)
+{
+    InterlockedIncrement(&runtime_exact_lookup_mutation);
+}
+
+static void runtime_exact_lookup_begin(void)
+{
+    if (++runtime_exact_lookup_scope == 0) {
+        memset(runtime_exact_root_hints, 0, sizeof(runtime_exact_root_hints));
+        runtime_exact_lookup_scope = 1;
+    }
+    runtime_exact_lookup_scope_active = 1;
+}
+
+static void runtime_exact_lookup_end(void)
+{
+    runtime_exact_lookup_scope_active = 0;
+}
 static int tsnode_probe_count;
 static DWORD addon_tsnode_window_until_tick;
 static int addon_tsnode_window_count;
@@ -3788,8 +3898,9 @@ static int normal_log_line_allowed(const char *fmt)
         normal_log_starts_with(fmt, "settings ignored ") ||
         normal_log_starts_with(fmt, "settings slider ") ||
         normal_log_starts_with(fmt, "incoming collision-strength ") ||
-        normal_log_starts_with(fmt, "gravity responsiveness ") ||
         normal_log_starts_with(fmt, "genital physics state ") ||
+        normal_log_starts_with(fmt, "PoseEdit file handoff ") ||
+        normal_log_starts_with(fmt, "physics room lifecycle ") ||
         normal_log_starts_with(fmt, "single-bone contact ")) {
         return 1;
     }
@@ -3834,18 +3945,12 @@ static void log_line(const char *fmt, ...)
     LeaveCriticalSection(&log_lock);
 }
 
-/* Temporary trace for the pose/undo test. Normal logging is capped at 600 rows
-   over three minutes; explicit debug mode keeps the throttled trace available. */
+/* Read-only gravity diagnostics, throttled per body/chain in debug mode. */
 static int gravity_response_trace_due(DWORD now, DWORD *last)
 {
-    static DWORD start;
-    static unsigned int count;
-    static int started;
-    if (!started) { start = now; started = 1; }
-    if ((!defaults_cfg.debug && (count >= 600u || now - start > 180000u)) ||
+    if (!defaults_cfg.debug ||
         (*last && now - *last < 1000u)) return 0;
     *last = now;
-    if (count < 600u) count++;
     return 1;
 }
 
@@ -3979,6 +4084,21 @@ static void physx_perf_report(DWORD now)
                  (unsigned long)physx_perf_state.calls[PHYSX_PERF_ADDON_SELF_COLLISION],
                  (unsigned long)physx_perf_state.calls[PHYSX_PERF_ADDON_ADDONS_COLLISION]);
     }
+    if (frames) {
+        /* These are nested costs already included in the ordinary phase
+           totals. Keep counts alongside timings to distinguish repeated
+           validation from an individually expensive engine operation. */
+        static const char *names[] = { "symbols", "find_object", "script_find",
+            "axis_lookup", "pivot_query" };
+        for (int i = 0; i < 5; ++i) {
+            physx_perf_phase_t phase = PHYSX_PERF_SYMBOL_RESOLUTION + i;
+            log_line("performance profile engine operation=%s avg_ms=%.6f max_call_ms=%.6f calls_per_frame=%.2f window_ms=%lu frames=%lu nested=1",
+                names[i], physx_perf_average_per_frame(phase, frames),
+                physx_perf_ms(physx_perf_state.maximum[phase]),
+                (double)physx_perf_state.calls[phase] / frames,
+                (unsigned long)window_ms, (unsigned long)frames);
+        }
+    }
     collision_profile_report(window_ms, frames, physx_perf_state.frequency.QuadPart);
     collision_profile_clear();
     collision_profile_state.enabled = 1;
@@ -4066,6 +4186,7 @@ static int body_chain_restore_gravity_snapshot_ex(
     /* Preserve the room's neutral pose, but reconfirm live sampling after a
        state handoff; a cached reference is not a current matrix sample. */
     memset(&state->gravity_sample, 0, sizeof(state->gravity_sample));
+    memset(&state->gravity_reference_sample, 0, sizeof(state->gravity_reference_sample));
     memset(&state->geometry_sample, 0, sizeof(state->geometry_sample));
     state->gravity_probe_sampled = snapshot->gravity_probe_sampled;
     memcpy(state->gravity_probe_root, snapshot->gravity_probe_root,
@@ -4469,6 +4590,8 @@ static void *resolve_script_engine_obj(const char *name, void **raw_out);
 static void capture_script_engine(void *app_base, void *script_engine, const char *source);
 static int is_nil_engine_object(void *raw, void *obj);
 
+#include "physx_collider_debug_filter.c"
+#include "physx_penis_collider.c"
 #include "physx_config.c"
 
 static void resolve_engine_symbols(void)
@@ -4479,6 +4602,7 @@ static void resolve_engine_symbols(void)
         engine_GetModelViewRotationPivot &&
         real_AppTracker_SetWorldMatrixInverse &&
         tramp_PoseEdit_UpdateObjectsFromTracks &&
+        poseedit_reset_hook_attempted &&
         tramp_AppBase_ProcessAnimation &&
         tramp_RuntimeRotationVectorWrite &&
         tramp_RuntimeJointRotationAxisWrite &&
@@ -4486,10 +4610,53 @@ static void resolve_engine_symbols(void)
         runtime_blendcontrol_weight_setter_installed &&
         addon_constraint_count_getter_installed &&
         engine_StringRefHash32 && engine_NameHashFind) return;
+    LONGLONG perf_start = physx_perf_counter();
     sys = GetModuleHandleA("ThriXXX010278-SYS.dll");
     app = GetModuleHandleA("ThriXXX010278-APP.dll");
-    if (!sys && !app) return;
+    if (!sys && !app) {
+        physx_perf_add(PHYSX_PERF_SYMBOL_RESOLUTION, perf_start);
+        return;
+    }
     engine_symbols_attempted = 1;
+    if (!poseedit_reset_hook_attempted && ptr_executable(POSEEDIT_RESET_POSE_ADDR)) {
+        /* TK17-158.001: push ebp; mov ebp,esp; sub esp,0x0c.
+           Copy complete instructions only; refuse an unknown/patched entry. */
+        static const BYTE expected[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x0c};
+        poseedit_reset_hook_attempted = 1;
+        if (ptr_readable(POSEEDIT_RESET_POSE_ADDR, sizeof(expected)) &&
+            !memcmp(POSEEDIT_RESET_POSE_ADDR, expected, sizeof(expected)) &&
+            install_inline_hook(POSEEDIT_RESET_POSE_ADDR,
+                (void*)hook_PoseEdit_ResetPose, sizeof(expected),
+                (void**)&tramp_PoseEdit_ResetPose)) {
+            log_line("PoseEdit file handoff reset-hook installed target=%p", POSEEDIT_RESET_POSE_ADDR);
+        } else {
+            log_line("PoseEdit file handoff reset-hook unavailable target=%p reason=\"entry mismatch or hook installation failed\"", POSEEDIT_RESET_POSE_ADDR);
+        }
+        /* The native queue entry is shared by New, pose-browser loading and
+           other pose-selection routes, before incoming properties are set. */
+        static const BYTE queue_expected[] = {0x55, 0x8b, 0xec, 0x83, 0xec, 0x30};
+        if (tramp_PoseEdit_ResetPose &&
+            ptr_readable(POSEEDIT_QUEUE_POSE_ADDR, sizeof(queue_expected)) &&
+            !memcmp(POSEEDIT_QUEUE_POSE_ADDR, queue_expected, sizeof(queue_expected)) &&
+            install_inline_hook(POSEEDIT_QUEUE_POSE_ADDR,
+                (void*)hook_PoseEdit_QueuePose, sizeof(queue_expected),
+                (void**)&tramp_PoseEdit_QueuePose)) {
+            log_line("PoseEdit file handoff queue-hook installed target=%p", POSEEDIT_QUEUE_POSE_ADDR);
+        } else {
+            log_line("PoseEdit file handoff queue-hook unavailable target=%p", POSEEDIT_QUEUE_POSE_ADDR);
+        }
+        /* PersonModule's native situation-change readiness predicate waits
+           for SituationFade_FX before allowing the queued pose to apply. */
+        static const BYTE fade_expected[] = {0x55,0x8b,0xec,0x51,0x8b,0x41,0x08};
+        if (tramp_PoseEdit_QueuePose &&
+            ptr_readable(POSE_FADE_READY_ADDR, sizeof(fade_expected)) &&
+            !memcmp(POSE_FADE_READY_ADDR, fade_expected, sizeof(fade_expected)) &&
+            install_inline_hook(POSE_FADE_READY_ADDR, (void*)hook_PoseFade_Ready,
+                sizeof(fade_expected), (void**)&tramp_PoseFade_Ready))
+            log_line("PoseEdit file handoff fade-ready-hook installed target=%p", POSE_FADE_READY_ADDR);
+        else
+            log_line("PoseEdit file handoff fade-ready-hook unavailable; using immediate cleanup with normal native presentation");
+    }
     if (!tramp_PoseEdit_UpdateObjectsFromTracks &&
         ptr_executable(POSEEDIT_UPDATE_OBJECTS_FROM_TRACKS_ADDR)) {
         if (install_inline_hook(
@@ -4755,6 +4922,7 @@ static void resolve_engine_symbols(void)
              (void*)tramp_CloneObject,
              (void*)real_CloneNode,
              (void*)tramp_CloneNode);
+    physx_perf_add(PHYSX_PERF_SYMBOL_RESOLUTION, perf_start);
 }
 
 static int is_nil_engine_object(void *raw, void *obj)
@@ -4810,11 +4978,13 @@ static void *resolve_find_obj(const char *name, void **raw_out)
     void *weak = NULL;
     if (raw_out) *raw_out = NULL;
     if (!engine_FindObjC || !name || !name[0]) return NULL;
+    LONGLONG perf_start = physx_perf_counter();
     raw = engine_FindObjC(name);
     if (raw_out) *raw_out = raw;
     if (raw && engine_GetWeakObjTarget) {
         weak = engine_GetWeakObjTarget(raw);
     }
+    physx_perf_add(PHYSX_PERF_FIND_OBJECT, perf_start);
     return weak ? weak : raw;
 }
 
@@ -4832,12 +5002,14 @@ static void *resolve_script_engine_obj(const char *name, void **raw_out)
     if (!vt || !ptr_readable(vt, sizeof(void*) * 28)) return NULL;
     find_object_c = (script_find_object_c_t)vt[27];
     if (!find_object_c) return NULL;
+    LONGLONG perf_start = physx_perf_counter();
     __asm__ ("movl %0, %%ecx" : : "r"(se) : "ecx");
     raw = find_object_c((char*)name);
     if (raw_out) *raw_out = raw;
     if (raw && engine_GetWeakObjTarget) {
         weak = engine_GetWeakObjTarget(raw);
     }
+    physx_perf_add(PHYSX_PERF_SCRIPT_FIND_OBJECT, perf_start);
     return weak ? weak : raw;
 }
 
@@ -4852,8 +5024,10 @@ static void import_script_object_tree_names(void *root_obj)
     if (!vt || !ptr_readable(vt, sizeof(void*) * 36)) return;
     import_names = (script_import_object_tree_names_t)vt[35];
     if (!import_names) return;
+    runtime_exact_lookup_invalidate();
     __asm__ ("movl %0, %%ecx" : : "r"(se) : "ecx");
     import_names(root_obj);
+    runtime_exact_lookup_invalidate();
 }
 
 static void dump_component_array_for_node(const char *name, void *object)
@@ -5343,6 +5517,7 @@ static void *resolve_runtime_exact_target(const char *name, void **raw_out, char
     size_t name_length = 0;
     DWORD hash;
     LONG generation;
+    LONG mutation = InterlockedCompareExchange(&runtime_exact_lookup_mutation, 0, 0);
     runtime_exact_root_hint_t *hint = NULL;
     void *obj;
     if (raw_out) *raw_out = NULL;
@@ -5356,6 +5531,10 @@ static void *resolve_runtime_exact_target(const char *name, void **raw_out, char
             hash & (RUNTIME_EXACT_ROOT_HINT_SLOTS - 1)];
         if (hint->hash == hash && hint->generation == generation &&
             runtime_exact_name_equal(hint->name, name)) {
+            if (hint->root_index == -1 && runtime_exact_lookup_scope_active &&
+                hint->miss_scope == runtime_exact_lookup_scope &&
+                hint->miss_mutation == mutation &&
+                hint->miss_script_engine == captured_script_engine) return NULL;
             failed_hint = hint->root_index;
             obj = resolve_runtime_exact_at_root(failed_hint, name,
                                                 raw_out, matched, matched_sz);
@@ -5377,6 +5556,17 @@ static void *resolve_runtime_exact_target(const char *name, void **raw_out, char
             }
             return obj;
         }
+    }
+    if (hint && runtime_exact_lookup_scope_active &&
+        generation == InterlockedCompareExchange(&named_node_generation, 0, 0) &&
+        mutation == InterlockedCompareExchange(&runtime_exact_lookup_mutation, 0, 0)) {
+        hint->hash = hash;
+        hint->generation = generation;
+        hint->root_index = -1;
+        hint->miss_scope = runtime_exact_lookup_scope;
+        hint->miss_mutation = mutation;
+        hint->miss_script_engine = captured_script_engine;
+        lstrcpynA(hint->name, name, sizeof(hint->name));
     }
     return NULL;
 }
@@ -5737,6 +5927,7 @@ static void *resolve_axis_map_raw(const char *name)
     void *raw = NULL;
     void *obj = NULL;
     if (!name || !name[0]) return NULL;
+    LONGLONG perf_start = physx_perf_counter();
     matched[0] = 0;
     obj = resolve_find_obj(name, &raw);
     if (!raw && captured_script_engine) {
@@ -5746,6 +5937,7 @@ static void *resolve_axis_map_raw(const char *name)
         obj = resolve_runtime_exact_target(name, &raw, matched, sizeof(matched));
     }
     (void)obj;
+    physx_perf_add(PHYSX_PERF_AXIS_LOOKUP, perf_start);
     return raw;
 }
 
@@ -6730,9 +6922,10 @@ static int poseedit_current_frame(double *frame_out)
     return 1;
 }
 
-static int poseedit_track_apply_zero(BYTE *track,
+static int poseedit_track_apply_value(BYTE *track,
                                      void *target_override,
-                                     double current_frame)
+                                     double current_frame,
+                                     const float value[3])
 {
     poseedit_track_update_t update_track;
     struct {
@@ -6753,6 +6946,7 @@ static int poseedit_track_apply_zero(BYTE *track,
     memset(&zero_array, 0, sizeof(zero_array));
     memset(track_copy, 0, sizeof(track_copy));
     zero_array.count = 1;
+    if (value) memcpy(zero_array.key, value, sizeof(float) * 3);
     memcpy(track_copy, track, POSEEDIT_TRACK_SIZE);
     *(void**)(track_copy + 0x04) = track_obj;
     *(void**)(track_copy + 0x24) = zero_array.key;
@@ -6760,6 +6954,12 @@ static int poseedit_track_apply_zero(BYTE *track,
     update_track = (poseedit_track_update_t)POSEEDIT_TRACK_UPDATE_ADDR;
     update_track(track_copy, current_frame);
     return 1;
+}
+
+static int poseedit_track_apply_zero(BYTE *track, void *target_override,
+                                     double current_frame)
+{
+    return poseedit_track_apply_value(track, target_override, current_frame, NULL);
 }
 
 static int validate_poseeditor_track_slot(BYTE *base, void *expected_obj)
@@ -8855,6 +9055,8 @@ static unsigned int reset_body_chain_person_state(
     state->late_ownership_log_tick = 0;
     state->ownership_candidate_tick = 0;
     state->clothing_resume_pending = 0;
+    state->pose_load_resume_pending = 0;
+    state->activation_resume_pending = 0;
     state->clothing_resume_pose_valid = 0;
     memset(state->clothing_resume_base_rest, 0, sizeof(state->clothing_resume_base_rest));
     state->clothing_resume_skeleton_valid = 0;
@@ -8970,6 +9172,8 @@ static unsigned int reset_body_chain_person_state(
     state->joint01_transform_lock_logged = 0;
     state->pose_compensation_valid = 0;
     state->pose_compensation_logged = 0;
+    state->pose_start_weight = 0.0f;
+    memset(state->pose_start_rotation, 0, sizeof(state->pose_start_rotation));
     state->pose_track_base = NULL;
     state->pose_track_saved_obj = NULL;
     state->pose_track_saved_track_data = NULL;
@@ -9077,7 +9281,9 @@ static void run_poseeditor_track_handoff_refresh(DWORD now)
         return;
     }
 
+    physx_poseedit_trace_rotations("off-before-evaluation", person_mask);
     update_objects(poseedit);
+    physx_poseedit_trace_rotations("off-after-evaluation", person_mask);
     log_line("body-chain-physics poseeditor handoff completed persons=0x%x poseedit=%p editpose=%p note=\"current pose tracks were evaluated once after PhysX ownership release\"",
              person_mask, poseedit, editpose);
 }
@@ -9287,6 +9493,53 @@ static int resolve_body_chain_anim_raws(const char *person, void *anim_joint_raw
     return 1;
 }
 
+/* Joint02/03 have native rotation channels independent of Spenis output.
+   Preserve the visible OFF bend through the same property setter, without
+   guessing an Euler conversion or changing the authored key arrays. */
+static void body_chain_apply_pose_start(const char *person,
+                                        body_chain_person_state_t *state)
+{
+    double frame;
+    int person_index;
+    if (state->pose_start_weight <= 0.0f || !poseedit_current_frame(&frame)) return;
+    for (person_index=0; person_index<4; person_index++)
+        if (person && !strcmp(person, body_chain_person_name(person_index))) break;
+    if (person_index==4) { state->pose_start_weight=0.0f; return; }
+    for (int i = 0; i < 2; i++) {
+        char name[256];
+        void *raw = NULL, *object;
+        BYTE *track = state->pose_track_extra_base[i];
+        void *target = state->pose_track_extra_saved_obj[i];
+        float value[3];
+        make_body_runtime_name(name, sizeof(name), person,
+            i ? "penis_joint03" : "penis_joint02");
+        object = resolve_find_obj(name, &raw);
+        if ((!object || is_nil_engine_object(raw, object)) && captured_script_engine)
+            object = resolve_script_engine_obj(name, &raw);
+        if (!state->pose_track_extra_suppressed[i] || !target ||
+            track != poseedit_track_slot(person_index,
+                i ? POSEEDIT_TRACK_PENIS_JOINT03 : POSEEDIT_TRACK_PENIS_JOINT02) ||
+            (target != raw && target != object) ||
+            !ptr_readable(track, POSEEDIT_TRACK_SIZE) ||
+            !engine_G_NilWeakObjTarget_ptr || !engine_G_NullArray_ptr ||
+            *(void**)(track + 4) != *engine_G_NilWeakObjTarget_ptr ||
+            *(void**)(track + 0x24) != *engine_G_NullArray_ptr) {
+            state->pose_start_weight = 0.0f;
+            return;
+        }
+        for (int a = 0; a < 3; a++)
+            value[a] = state->pose_start_rotation[i][a] * state->pose_start_weight;
+        poseedit_track_apply_value(track, target, frame, value);
+    }
+}
+
+static void body_chain_advance_pose_start(body_chain_person_state_t *state, float dt)
+{
+    if (state->pose_start_weight <= 0.0f || !isfinite(dt) || dt <= 0.0f) return;
+    state->pose_start_weight *= expf(-dt / .060f);
+    if (state->pose_start_weight < .00001f) state->pose_start_weight = 0.0f;
+}
+
 static int neutralize_body_chain_animation(const char *person, body_chain_person_state_t *state)
 {
     void *anim_joint_raw[3] = { NULL, NULL, NULL };
@@ -9340,6 +9593,7 @@ static int neutralize_body_chain_animation(const char *person, body_chain_person
                  body_chain_physics_cfg.animation_override_offsets[7],
                  body_chain_physics_cfg.animation_override_offset_count);
     }
+    body_chain_apply_pose_start(person, state);
     return 1;
 }
 
@@ -9441,27 +9695,28 @@ static int lock_body_chain_joint01_transform(const char *person,
     return 1;
 }
 
-static int capture_body_chain_pose_compensation(
+static int capture_body_chain_pose_start(
     int person_index,
     const char *person,
-    body_chain_person_state_t *state)
+    body_chain_person_state_t *state, int testicle)
 {
-    static const int track_ids[2] = {
-        POSEEDIT_TRACK_PENIS_JOINT02,
-        POSEEDIT_TRACK_PENIS_JOINT03
+    const int track_ids[2] = {
+        testicle ? POSEEDIT_TRACK_TESTICLES_JOINT01 : POSEEDIT_TRACK_PENIS_JOINT02,
+        testicle ? POSEEDIT_TRACK_TESTICLES_JOINT02 : POSEEDIT_TRACK_PENIS_JOINT03
     };
-    static const char *joint_suffixes[2] = {
-        "penis_joint02",
-        "penis_joint03"
+    const char *joint_suffixes[2] = {
+        testicle ? "testicles_joint01" : "penis_joint02",
+        testicle ? "testicles_joint02" : "penis_joint03"
     };
+    const body_chain_physics_config_t *cfg = testicle ? &testicle_physics_cfg : &body_chain_physics_cfg;
     poseedit_track_evaluate_t evaluate_track;
     BYTE *tracks[2] = { NULL, NULL };
     float captured_pose[2][3];
     double current_frame;
     int i, axis;
 
-    if (!body_chain_physics_cfg.override_animation ||
-        !body_chain_physics_cfg.poseeditor_track_override ||
+    if (!cfg->override_animation ||
+        !cfg->poseeditor_track_override ||
         !person || !state) {
         return 1;
     }
@@ -9497,6 +9752,15 @@ static int capture_body_chain_pose_compensation(
         if ((!joint_obj || is_nil_engine_object(joint_raw, joint_obj)) &&
             captured_script_engine) {
             joint_obj = resolve_script_engine_obj(joint_name, &joint_raw);
+        }
+        if (testicle && joint_obj && !is_nil_engine_object(joint_raw,joint_obj) &&
+            !validate_poseeditor_track_slot(track,joint_obj) &&
+            !validate_poseeditor_track_slot(track,joint_raw)) {
+            BYTE *found=find_poseedit_track_slot_by_object(person_index,track_ids[i],joint_obj,NULL,-1);
+            if (!found && joint_raw)
+                found=find_poseedit_track_slot_by_object(person_index,track_ids[i],joint_raw,NULL,-1);
+            if (!found) return 0;
+            track=found;
         }
         track_obj = *(void**)(track + 0x04);
         if (!joint_obj || is_nil_engine_object(joint_raw, joint_obj) ||
@@ -9537,18 +9801,23 @@ static int capture_body_chain_pose_compensation(
      * memory writes.
     */
     for (i = 0; i < 2; i++) {
-        if (!poseedit_track_apply_zero(tracks[i], NULL, current_frame)) {
+        /* Testicles use SSimpleTransform.Rotation (the solver output channel),
+           so their evaluated pose is seeded into the springs directly. Only
+           penis RotationAxis needs a separate native residual. */
+        if (!testicle && !poseedit_track_apply_zero(tracks[i], NULL, current_frame)) {
             return 0;
         }
         for (axis = 0; axis < 3; axis++) {
             state->pose_compensation[i + 1][axis] = 0.0f;
         }
     }
+    memcpy(state->pose_start_rotation, captured_pose, sizeof(captured_pose));
+    state->pose_start_weight = testicle ? 0.0f : 1.0f;
     state->pose_compensation_valid = 1;
     if (!state->pose_compensation_logged) {
         state->pose_compensation_logged = 1;
-        log_line("body-chain-physics poseeditor ownership neutralized person=\"%s\" frame=%.3f previous_joint02=(%.3f,%.3f,%.3f) previous_joint03=(%.3f,%.3f,%.3f) applied=(0.000,0.000,0.000) source=\"native PoseTrack evaluator/update\" note=\"TK17's validated property path resets all PoseEditor axes before PhysX disconnects the tracks; real keyframes remain untouched\"",
-                 person,
+        log_line("body-chain-physics poseeditor smooth ownership person=\"%s\" system=%s frame=%.3f previous_first=(%.3f,%.3f,%.3f) previous_second=(%.3f,%.3f,%.3f) source=\"native PoseTrack evaluator/update\" note=\"captured native bends ease out after gravity is ready; real keyframes remain untouched\"",
+                 person, testicle ? "testicles" : "penis",
                  current_frame,
                  captured_pose[0][0],
                  captured_pose[0][1],
@@ -9557,6 +9826,22 @@ static int capture_body_chain_pose_compensation(
                  captured_pose[1][1],
                  captured_pose[1][2]);
     }
+    return 1;
+}
+
+static int capture_body_chain_pose_compensation(int person_index, const char *person,
+                                               body_chain_person_state_t *state)
+{
+    return capture_body_chain_pose_start(person_index, person, state, 0);
+}
+
+static int capture_testicle_pose_start(int person_index, const char *person,
+    body_chain_person_state_t *state, float visible[3][3])
+{
+    if (!capture_body_chain_pose_start(person_index,person,state,1)) return 0;
+    if (testicle_physics_cfg.override_animation && testicle_physics_cfg.poseeditor_track_override &&
+        state->pose_compensation_valid)
+        for (int i=0;i<2;i++) memcpy(visible[i],state->pose_start_rotation[i],sizeof(float)*3);
     return 1;
 }
 
@@ -9983,7 +10268,9 @@ static int body_collider_engine_pivot_view_object(void *object,
     }
     /* This TK17 API is explicitly a model-view pivot query. Its result is already in the
        coordinate space consumed by the active renderer projection. */
+    LONGLONG perf_start = physx_perf_counter();
     engine_GetModelViewRotationPivot(object, view);
+    physx_perf_add(PHYSX_PERF_PIVOT_QUERY, perf_start);
     if (!sane_probe_float(view[0]) ||
         !sane_probe_float(view[1]) ||
         !sane_probe_float(view[2])) {
@@ -10599,6 +10886,7 @@ static int body_collision_world_vector_to_local(
 static int body_collision_local_point_to_world(
     const body_chain_collider_person_state_t *state,
     const float local[3], float world[3]);
+#include "physx_placement_cache.c"
 #include "physx_colliders.c"
 #include "physx_single_bone_contact.c"
 
@@ -10607,6 +10895,7 @@ static int butt_physics_apply_all_outputs(int capture_animation);
 static void run_butt_physics_late_ownership(DWORD now);
 static void reset_butt_physics_all(int restore_output);
 
+#include "physx_relative_gravity.c"
 #include "physx_physics.c"
 #include "physx_butt.c"
 #include "physx_room_wind.c"
@@ -10616,11 +10905,26 @@ static void reset_butt_physics_all(int restore_output);
 #include "physx_sidecar.c"
 #include "physx_genital_visibility.c"
 
+static void physx_customizer_transition_tick(DWORD now);
 static void physx_tick(void)
 {
     DWORD now = GetTickCount();
     LONGLONG total_start;
     LONGLONG phase_start;
+    if (physx_shutting_down) return;
+    physx_customizer_transition_tick(now);
+    if (physx_poseedit_transition_busy()) {
+        /* Loading must not bake our output into the incoming pose. Keep the
+           read-only axis observer alive between native calls, though: waiting
+           until after the pose has rotated the body captures the wrong rest
+           frame and can exchange sideways/up-down motion. */
+        if (!poseedit_file_command_depth &&
+            !InterlockedCompareExchange(&physx_physics_phase_busy, 1, 0)) {
+            body_chain_prime_axis_references(now);
+            InterlockedExchange(&physx_physics_phase_busy, 0);
+        }
+        return;
+    }
     if (InterlockedCompareExchange(&physx_physics_phase_busy, 1, 0)) return;
     /* Also blocks a late animation callback from advancing these chains again
        after the ordinary frame-end simulation has already run. */
@@ -10629,6 +10933,7 @@ static void physx_tick(void)
     physx_simulation_serial++;
     if (!physx_simulation_serial) physx_simulation_serial = 1;
     total_start = physx_perf_counter();
+    runtime_exact_lookup_begin();
 
     phase_start = physx_perf_counter();
     body_chain_poll_poseeditor_mode(now);
@@ -10659,8 +10964,14 @@ static void physx_tick(void)
     run_poseeditor_track_handoff_refresh(now);
 
     phase_start = physx_perf_counter();
+    if (physx_prepare_customizer_entry()) {
+        /* The invalidated transforms are published by the next native pass.
+           Sampling immediately here would re-accept the outgoing pose. */
+        runtime_exact_lookup_end();
+        InterlockedExchange(&physx_physics_phase_busy, 0);
+        return;
+    }
     update_targets(now);
-    body_profile_probe_runtime_bindings(now);
     physx_update_genital_pause_state(now);
     body_update_prepare_frame(now);
     physx_perf_add(PHYSX_PERF_BINDINGS, phase_start);
@@ -10715,6 +11026,7 @@ static void physx_tick(void)
     rebuild_addon_constraint_suppression_cache();
     rebuild_addon_animation_suppression_cache();
     physx_perf_add(PHYSX_PERF_ADDON_SUPPRESSION_CACHE, phase_start);
+    runtime_exact_lookup_end();
     body_profile_set_active_person_config(-1);
     physx_perf_add(PHYSX_PERF_TOTAL, total_start);
     physx_perf_report(now);
@@ -10783,10 +11095,11 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
          * object lookups used by the manual reset routines are no longer
          * valid. Windows is about to reclaim every plugin allocation anyway.
          *
-         * Keep the full cleanup below for a real FreeLibrary unload, where
-         * reserved is NULL and the game continues running.
+         * A confirmed Exit command can also explicitly FreeLibrary extensions
+         * after object disposal. Skip object cleanup there too; keep it only
+         * for a real live-game unload.
          */
-        if (reserved != NULL) {
+        if (reserved != NULL || physx_shutting_down) {
             log_ready = 0;
             return TRUE;
         }

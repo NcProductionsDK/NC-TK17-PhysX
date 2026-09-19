@@ -1,3 +1,40 @@
+# Penis collider dimensions and offsets - 2026-09-18
+
+- Add scalar `penis_radius` and body-local `penis01/02/03_fine_offset` under
+  `[body_colliders]`, including sidecar inheritance and live reload. Preserve
+  shared probe thickness as `collision_margin_radius`; `chain_radius` remains
+  a per-file compatibility fallback for each replacement radius key.
+- Offset collision geometry without changing animation or gravity/inertia
+  pivots. Keep shared endpoints connected; the tip shares the third offset.
+  Apply geometry consistently to active/passive contacts and all drawing paths.
+- Expand body targets by the moving owner's radius while preserving each
+  target person's stored configuration. Retain raw pivots for contact kinematics.
+- Test aliases, invalid values, reload defaults, per-person inheritance,
+  contact prediction, translation-invariant solving and wire geometry.
+
+# Collider debug isolation - 2026-09-18
+
+- Add global `debug_draw_person` (0 = all, 1-4 = one person), named
+  `debug_draw_filter` (default `all`), and `debug_draw_capsules` (default true)
+  under `[body_colliders]`. Body sidecars may override the filter, capsule
+  toggle, and `debug_draw`; the person selector remains global.
+- Apply the controls to Hook5, Direct3D 8, and OpenGL debug drawing. Selected
+  spherical colliders remain visible with capsules hidden. Physics is unchanged.
+- Test single/pair/finger selection, capsule visibility, person isolation,
+  sidecar inheritance and key removal, and drawing without solver-state changes.
+
+# Body sidecar identity - 2026-09-18
+
+- Remove blendshape signature scanning and runtime signature invalidation.
+  Bind body sidecars using exact file paths and per-person body-load/selection
+  events; bodies need no specific morphs or readable scene contents.
+- Clear the previous profile on body replacement, preserve known selection ids
+  for cached loads, and ignore non-body selection events. Deduplicate pending
+  loads and reject ambiguous file-first candidates. Scene-node fallback accepts
+  only the body source asset name, never arbitrary names containing `bodyXX`.
+- Add production-code regression tests for per-person overrides, shared add-ons,
+  bodies without sidecars, both event orders, cached selections and ambiguity.
+
 # Breast/butt collision offsets and setting aliases - 2026-09-16
 
 - Add optional XYZ `collision_min_offset` and `collision_max_offset` for

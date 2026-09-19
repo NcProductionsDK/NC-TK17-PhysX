@@ -23,6 +23,11 @@ source = r'''
 #include "../physx_collision_frame.h"
 typedef uint32_t DWORD;
 typedef int32_t LONG;
+/* This fixture exercises cold placement acquisition. Production reuse and
+   its live binding/property checks run in body_gravity_camera_test.c. */
+typedef struct { collision_frame_sample_t collision; } body_placement_cache_t;
+static body_placement_cache_t *body_placement_cache_for(const char *p, void *trs)
+{ (void)p; (void)trs; return NULL; }
 typedef struct {
  collision_frame_sample_t contact_frame_sample;
  float contact_view_to_world[9],contact_world_to_view[9],contact_world_origin[3];
