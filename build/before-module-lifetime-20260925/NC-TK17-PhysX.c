@@ -11071,24 +11071,9 @@ static void physx_tick(void)
 #include "physx_collider_draw.c"
 #include "physx_render_hooks.c"
 #include "physx_public_api.c"
-#include "physx_module_lifetime.h"
-
-static int physx_require_hook_lifetime(void)
-{
-    static int held;
-    if (held) return 1;
-    if (!physx_pin_hook_module(self_module)) {
-        log_line("PhysX hook installation refused: module lifetime protection failed error=%lu", GetLastError());
-        return 0;
-    }
-    held=1;
-    log_line("PhysX module retained until process exit: engine hooks cannot outlive DLL code");
-    return 1;
-}
 
 __declspec(dllexport) int loadextension(void)
 {
-    if (!physx_require_hook_lifetime()) return 0;
     load_global_config();
     resolve_engine_symbols();
     patch_all_modules();
@@ -11103,7 +11088,6 @@ __declspec(dllexport) int loadextension(void)
 
 __declspec(dllexport) int on_create(void)
 {
-    if (!physx_require_hook_lifetime()) return 0;
     load_global_config();
     resolve_engine_symbols();
     patch_all_modules();

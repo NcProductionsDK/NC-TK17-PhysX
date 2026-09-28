@@ -321,3 +321,14 @@ broader gameplay coverage. Dedicated body/body physics was not overhauled.
 
 Fiesta's local test configuration also gained `spine03` and `spine04` collision
 targets. That addon-specific INI edit is not part of this general plugin package.
+# Hook module lifetime - 2026-09-25
+
+- Retain PhysX until process exit before installing engine hooks. Two game
+  crashes reached its rotation hook after TK17's background module routine
+  called FreeLibrary from 0x005a2b26 while animation was still active.
+- Refuse hook initialization if module lifetime protection fails. Both loader
+  entry points use the same startup guard; no settings or simulation changes.
+- Live DLL unloading is unsupported once hooks are installed. Restart the game
+  to replace/disable the DLL. The operating system reclaims it on game exit.
+- Windows loader regression checks failed initialization, an unpinned control,
+  and callbacks surviving 256 FreeLibrary calls when pinned.

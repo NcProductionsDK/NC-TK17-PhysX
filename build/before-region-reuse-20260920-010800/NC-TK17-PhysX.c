@@ -3901,10 +3901,6 @@ static int normal_log_line_allowed(const char *fmt)
         normal_log_starts_with(fmt, "genital physics state ") ||
         normal_log_starts_with(fmt, "PoseEdit file handoff ") ||
         normal_log_starts_with(fmt, "physics room lifecycle ") ||
-        normal_log_starts_with(fmt, "physics game-mode ") ||
-        normal_log_starts_with(fmt, "body-chain-physics mode ") ||
-        normal_log_starts_with(fmt, "physics Customizer entered ") ||
-        normal_log_starts_with(fmt, "physics Customizer left ") ||
         normal_log_starts_with(fmt, "single-bone contact ")) {
         return 1;
     }
@@ -4382,7 +4378,6 @@ static void trim_in_place(char *s)
    The cache is advanced by the D3D8/OpenGL presentation hooks, so mappings are
    never trusted across rendered frames. */
 #define PTR_READABLE_CACHE_SLOTS 256
-#define PTR_READABLE_RECENT_REGIONS 16
 
 typedef struct ptr_readable_cache_entry_t {
     BYTE *base;
@@ -4394,27 +4389,6 @@ static volatile LONG ptr_readable_cache_epoch = 1;
 static __thread ptr_readable_cache_entry_t
     ptr_readable_cache[PTR_READABLE_CACHE_SLOTS];
 static __thread unsigned int ptr_readable_cache_last_slot;
-/* The page hash cannot find a previously queried region through a different
-   page after another region became "last". Keep a small associative fallback
-   of whole regions. Only hash misses search it; ordinary hits are unchanged.
-   These positive entries have exactly the same frame epoch as the page cache. */
-static __thread ptr_readable_cache_entry_t
-    ptr_readable_recent_regions[PTR_READABLE_RECENT_REGIONS];
-static __thread unsigned int ptr_readable_recent_next;
-
-static int ptr_readable_find_recent(BYTE *cur, LONG epoch,
-                                     ptr_readable_cache_entry_t *result)
-{
-    unsigned int i;
-    for (i = 0; i < PTR_READABLE_RECENT_REGIONS; ++i) {
-        const ptr_readable_cache_entry_t *entry = &ptr_readable_recent_regions[i];
-        if (entry->epoch == epoch && cur >= entry->base && cur < entry->end) {
-            *result = *entry;
-            return 1;
-        }
-    }
-    return 0;
-}
 
 static void ptr_readable_cache_advance_frame(void)
 {
@@ -4426,11 +4400,11 @@ static int ptr_readable(const void *p, size_t bytes)
 {
     MEMORY_BASIC_INFORMATION mbi;
     BYTE *cur = (BYTE*)p;
-    BYTE *end;
+    BYTE *end = cur + bytes;
     LONG epoch = InterlockedCompareExchange(&ptr_readable_cache_epoch, 0, 0);
 
-    if (!p || bytes > UINTPTR_MAX - (uintptr_t)p) return 0;
-    end = (BYTE*)((uintptr_t)p + bytes);
+    if (!p) return 0;
+    if (end < cur) return 0;
     while (cur < end) {
         /* Entries describe regions, not individual pages. Reuse the last
            entry when scanning another page of that same region, before
@@ -4451,19 +4425,11 @@ static int ptr_readable(const void *p, size_t bytes)
             cur = entry->end;
             continue;
         }
-        if (ptr_readable_find_recent(cur, epoch, entry)) {
-            ptr_readable_cache_last_slot = slot;
-            cur = entry->end;
-            continue;
-        }
         if (!VirtualQuery(cur, &mbi, sizeof(mbi))) return 0;
         if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return 0;
         entry->base = (BYTE*)mbi.BaseAddress;
         entry->end = entry->base + mbi.RegionSize;
         entry->epoch = epoch;
-        ptr_readable_recent_regions[ptr_readable_recent_next] = *entry;
-        ptr_readable_recent_next = (ptr_readable_recent_next + 1) &
-                                  (PTR_READABLE_RECENT_REGIONS - 1);
         ptr_readable_cache_last_slot = slot;
         cur = entry->end;
     }
@@ -11071,24 +11037,9 @@ static void physx_tick(void)
 #include "physx_collider_draw.c"
 #include "physx_render_hooks.c"
 #include "physx_public_api.c"
-#include "physx_module_lifetime.h"
-
-static int physx_require_hook_lifetime(void)
-{
-    static int held;
-    if (held) return 1;
-    if (!physx_pin_hook_module(self_module)) {
-        log_line("PhysX hook installation refused: module lifetime protection failed error=%lu", GetLastError());
-        return 0;
-    }
-    held=1;
-    log_line("PhysX module retained until process exit: engine hooks cannot outlive DLL code");
-    return 1;
-}
 
 __declspec(dllexport) int loadextension(void)
 {
-    if (!physx_require_hook_lifetime()) return 0;
     load_global_config();
     resolve_engine_symbols();
     patch_all_modules();
@@ -11103,7 +11054,6 @@ __declspec(dllexport) int loadextension(void)
 
 __declspec(dllexport) int on_create(void)
 {
-    if (!physx_require_hook_lifetime()) return 0;
     load_global_config();
     resolve_engine_symbols();
     patch_all_modules();

@@ -14,6 +14,9 @@ NC-TK17-PhysX is an experimental 32-bit Windows extension for The Klub 17. It ad
 - A larger, collision-resistant per-frame cache for repeated Windows
   memory-readability checks, preserving the existing safety checks while
   avoiding redundant `VirtualQuery` calls
+- Same-frame reuse of the 16 most recently queried readable regions when
+  alternating allocations defeat the page hash; see
+  [validation and rollback notes](docs/REGION-REUSE-20260920.md)
 - Cached runtime-root hints for body and addon target resolution. The extension
   still asks TK17 for the current live object on every lookup, but avoids
   rebuilding and rescanning unchanged root prefixes throughout a stable room

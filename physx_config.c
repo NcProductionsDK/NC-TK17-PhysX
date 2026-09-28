@@ -1601,12 +1601,15 @@ static void body_profile_build_game_path_a(const char *rel,
     body_profile_normalize_path_a(out);
 }
 
+#include "physx_game_mode.h"
+
 static void body_profile_handle_goodbye_log_line_a(const char *line)
 {
     const char *start;
     const char *end;
     char path[256];
     size_t len;
+    physx_game_mode_log_line(line);
     if (!line || !contains_i(line, "Execute3")) return;
     start = strchr(line, '\'');
     if (!start) return;
