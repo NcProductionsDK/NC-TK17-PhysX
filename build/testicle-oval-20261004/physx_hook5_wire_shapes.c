@@ -21,13 +21,6 @@ static void physx_wire_body_edge(physx_wire_batch *batch,
 {
     if(!state->valid[start] || !state->valid[end] ||
        !body_collider_debug_edge_selected(start,end)) return;
-    if(start==BODY_COLLIDER_TESTICLES_01 && end==BODY_COLLIDER_TESTICLES_02) {
-        float axes[3];
-        body_chain_collider_visual_radius_axes_for_node(start,axes);
-        physx_wire_elliptic_capsule(batch,state->local_position[start],
-            state->local_position[end],axes,color);
-        return;
-    }
     physx_wire_capsule(batch,state->local_position[start],state->local_position[end],
         body_chain_collider_visual_radius_for_node(start),
         body_chain_collider_visual_radius_for_node(end),color);

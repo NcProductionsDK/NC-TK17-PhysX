@@ -118,19 +118,4 @@ static void physx_wire_capsule(physx_wire_batch *b, const float start[3],
         }
     }
 }
-/* Scale a unit capsule in body coordinates so its end caps have the same
-   XYZ radii as the endpoint ellipsoids. Restore the caller's frame. */
-static void physx_wire_elliptic_capsule(physx_wire_batch *b,
-    const float start[3],const float end[3],const float axes[3],uint32_t color)
-{
-    float saved[16],s[3],e[3]; unsigned k,col;
-    for(k=0;k<3;k++) if(!isfinite(axes[k]) || axes[k]<=0) return;
-    memcpy(saved,b->matrix,sizeof(saved));
-    for(k=0;k<3;k++) {
-        s[k]=start[k]/axes[k];e[k]=end[k]/axes[k];
-        for(col=0;col<4;col++) b->matrix[k*4+col]*=axes[k];
-    }
-    physx_wire_capsule(b,s,e,1,1,color);
-    memcpy(b->matrix,saved,sizeof(saved));
-}
 #endif

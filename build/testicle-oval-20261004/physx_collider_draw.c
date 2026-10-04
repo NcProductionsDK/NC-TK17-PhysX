@@ -546,38 +546,6 @@ static void draw_room_collision_d3d8(IDirect3DDevice8 *device)
     }
 }
 
-static int body_debug_ellipse_connector_offsets(const float p0[2],const float p1[2],
-    const float major[2][2],const float minor[2][2],float out[2][2])
-{
-    float normal[2]={p0[1]-p1[1],p1[0]-p0[0]};
-    for(int j=0;j<2;j++) {
-        float u=normal[0]*major[j][0]+normal[1]*major[j][1];
-        float v=normal[0]*minor[j][0]+normal[1]*minor[j][1];
-        float length=sqrtf(u*u+v*v);
-        if(length<.000001f) return 0;
-        for(int a=0;a<2;a++) out[j][a]=(major[j][a]*u+minor[j][a]*v)/length;
-    }
-    return 1;
-}
-
-static void draw_d3d8_testicle_connector(IDirect3DDevice8 *device,
-    const body_chain_collider_person_state_t *state,
-    const float p0[2],const float p1[2],DWORD color)
-{
-    float major[2][2],minor[2][2],offset[2][2],axes[3];
-    const float *p[2]={p0,p1};
-    for(int j=0;j<2;j++) {
-        int node=BODY_COLLIDER_TESTICLES_01+j;
-        body_chain_collider_visual_radius_axes_for_node(node,axes);
-        if(!body_chain_debug_projected_ellipse_d3d8(device,state,
-            state->local_position[node],axes,p[j][0],p[j][1],major[j],minor[j])) return;
-    }
-    if(!body_debug_ellipse_connector_offsets(p0,p1,major,minor,offset)) return;
-    for(int sign=-1;sign<=1;sign+=2)
-        draw_d3d8_debug_line(device,p0[0]+sign*offset[0][0],p0[1]+sign*offset[0][1],
-            p1[0]+sign*offset[1][0],p1[1]+sign*offset[1][1],color);
-}
-
 static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
 {
     DWORD old_z = 0, old_lighting = 0, old_fog = 0;
@@ -821,10 +789,6 @@ static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
                 }
                 if (!draw_valid[start] || !draw_valid[end] ||
                     !body_collider_debug_edge_selected(start, end)) continue;
-                if(start==BODY_COLLIDER_TESTICLES_01 && end==BODY_COLLIDER_TESTICLES_02) {
-                    draw_d3d8_testicle_connector(device,state,p[start],p[end],color);
-                    continue;
-                }
                 draw_d3d8_debug_tapered_capsule(device,
                     p[start][0], p[start][1], radius_px[start],
                     p[end][0], p[end][1], radius_px[end], color);
@@ -1026,8 +990,15 @@ static void draw_body_chain_colliders_d3d8(IDirect3DDevice8 *device)
             }
             if (draw_valid[BODY_COLLIDER_TESTICLES_01] &&
                 draw_valid[BODY_COLLIDER_TESTICLES_02]) {
-                draw_d3d8_testicle_connector(device,state,
-                    p[BODY_COLLIDER_TESTICLES_01],p[BODY_COLLIDER_TESTICLES_02],0xffff40ff);
+                draw_d3d8_debug_tapered_capsule(
+                    device,
+                    p[BODY_COLLIDER_TESTICLES_01][0],
+                    p[BODY_COLLIDER_TESTICLES_01][1],
+                    radius_px[BODY_COLLIDER_TESTICLES_01],
+                    p[BODY_COLLIDER_TESTICLES_02][0],
+                    p[BODY_COLLIDER_TESTICLES_02][1],
+                    radius_px[BODY_COLLIDER_TESTICLES_02],
+                    0xffff40ff);
             }
         }
         body_profile_set_active_person_config(-1);
@@ -1395,25 +1366,6 @@ static void draw_addon_sidecar_colliders_opengl(
     }
 }
 
-static void draw_opengl_testicle_connector(const GLfloat projection[16],
-    const GLint viewport[4],const body_chain_collider_person_state_t *state,
-    const float p0[2],const float p1[2],DWORD color)
-{
-    float major[2][2],minor[2][2],offset[2][2],axes[3];
-    const float *p[2]={p0,p1};
-    for(int j=0;j<2;j++) {
-        int node=BODY_COLLIDER_TESTICLES_01+j;
-        body_chain_collider_visual_radius_axes_for_node(node,axes);
-        if(!body_chain_debug_projected_ellipse_opengl(projection,viewport,state,
-            state->local_position[node],axes,p[j][0],p[j][1],major[j],minor[j])) return;
-    }
-    if(!body_debug_ellipse_connector_offsets(p0,p1,major,minor,offset)) return;
-    for(int sign=-1;sign<=1;sign+=2)
-        draw_opengl_debug_line(p0[0]+sign*offset[0][0],p0[1]+sign*offset[0][1],
-            p1[0]+sign*offset[1][0],p1[1]+sign*offset[1][1],
-            (color>>16)&255,(color>>8)&255,color&255);
-}
-
 static void draw_body_chain_colliders_opengl(void)
 {
     GLfloat projection[16];
@@ -1641,10 +1593,6 @@ static void draw_body_chain_colliders_opengl(void)
                 }
                 if (!draw_valid[start] || !draw_valid[end] ||
                     !body_collider_debug_edge_selected(start, end)) continue;
-                if(start==BODY_COLLIDER_TESTICLES_01 && end==BODY_COLLIDER_TESTICLES_02) {
-                    draw_opengl_testicle_connector(projection,viewport,state,p[start],p[end],color);
-                    continue;
-                }
                 draw_opengl_debug_tapered_capsule(
                     p[start][0], p[start][1], radius_px[start],
                     p[end][0], p[end][1], radius_px[end], (color >> 16) & 255, (color >> 8) & 255, color & 255);
@@ -1840,8 +1788,14 @@ static void draw_body_chain_colliders_opengl(void)
             }
             if (draw_valid[BODY_COLLIDER_TESTICLES_01] &&
                 draw_valid[BODY_COLLIDER_TESTICLES_02]) {
-                draw_opengl_testicle_connector(projection,viewport,state,
-                    p[BODY_COLLIDER_TESTICLES_01],p[BODY_COLLIDER_TESTICLES_02],0xffff40ff);
+                draw_opengl_debug_tapered_capsule(
+                    p[BODY_COLLIDER_TESTICLES_01][0],
+                    p[BODY_COLLIDER_TESTICLES_01][1],
+                    radius_px[BODY_COLLIDER_TESTICLES_01],
+                    p[BODY_COLLIDER_TESTICLES_02][0],
+                    p[BODY_COLLIDER_TESTICLES_02][1],
+                    radius_px[BODY_COLLIDER_TESTICLES_02],
+                    255, 64, 255);
             }
         }
         body_profile_set_active_person_config(-1);

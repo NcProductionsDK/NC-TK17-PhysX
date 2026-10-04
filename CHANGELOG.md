@@ -1,3 +1,35 @@
+# Testicle toggle self-collision - 2026-10-04
+
+- Respect all three `testicles_radius` components in the native distal contact
+  path and testicle capsule drawing. Previously, the capsule used the largest
+  component for every axis while endpoint ellipsoids used the full vector.
+  Query the native capsule in scaled coordinates and use its surface normal;
+  retain the moving penis radius as contact clearance. Hook5 wire geometry and
+  legacy D3D/OpenGL connectors now follow the endpoint ellipsoid dimensions.
+  `run_testicle_oval_tests.py` covers independent axis edits, side/end/diagonal
+  contact, centerline crossings and capsule-to-ellipsoid drawing agreement.
+- Preserve the original both-enabled response as the baseline: keep its
+  self-contact radius, attachment exclusion, readiness gate and candidate
+  sampling. None of the added native-testicle contact applies while testicle
+  simulation is enabled.
+- With testicle simulation off, retain the established narrow bone-segment
+  contact for the first penis segment and its shared attachment. Give the
+  second and third segments contact against the configured testicle capsule,
+  including its radius and center offsets, so native testicles that cannot
+  yield to PhysX still resist shaft/tip penetration. Replace the narrow probe
+  for those segments instead of accumulating both shapes. Diagnostics label
+  this path `native_testicles_distal`.
+- Use a simulated candidate only while testicle PhysX owns the chain; otherwise
+  read the native bone sample without changing animation or solver state.
+  Preserve sample expiry, collision switches, and other-person collision shapes.
+- Add `run_testicle_toggle_collision_tests.py`, using frozen Person02 geometry
+  from the October 4 log. Verify the original both-enabled result, preserved
+  first-segment attachment rules, native distal separation over repeated
+  production solver steps, radius/offset sensitivity, both disable switches,
+  candidate ownership and stale-sample rejection in runtime and PoseEditor.
+  Contact, penis collider and Customizer regression suites pass. In-game
+  confirmation remains pending.
+
 # Penis collider dimensions and offsets - 2026-09-18
 
 - Add scalar `penis_radius` and body-local `penis01/02/03_fine_offset` under

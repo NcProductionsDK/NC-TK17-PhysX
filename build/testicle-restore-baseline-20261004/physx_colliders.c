@@ -3410,55 +3410,6 @@ static int body_chain_collider_pair_margin(const float start[3],
     return 1;
 }
 
-/* Native self-contact uses the same body-local XYZ axes as the drawn
-   testicle ellipsoids. Find the closest pair in ellipsoid space, then return
-   the contact plane in body units. Its normal is the ellipsoid gradient,
-   not the radial direction used for circular capsules. */
-static int body_chain_native_testicle_pair_margin(
-    const float start[3], const float end[3],
-    const float pair_a[3], const float pair_b[3], float sweep,
-    float *chain_t, float *pair_t, float closest_chain[3],
-    float closest_pair[3], float *dist, float *radius, float *margin)
-{
-    float axes[3],s[3],e[3],a[3]={0},b[3],p[3],q[3],n[3];
-    float scaled_dist,normal_len=0;
-    int k;
-    body_chain_collider_visual_radius_axes_for_node(BODY_COLLIDER_TESTICLES_MID,axes);
-    for(k=0;k<3;k++) {
-        axes[k]+=body_chain_collider_cfg.chain_radius+sweep;
-        if(!isfinite(axes[k]) || axes[k]<=0) return 0;
-        s[k]=(start[k]-pair_a[k])/axes[k];
-        e[k]=(end[k]-pair_a[k])/axes[k];
-        b[k]=(pair_b[k]-pair_a[k])/axes[k];
-    }
-    body_chain_closest_segment_pair(s,e,a,b,chain_t,pair_t,p,q,&scaled_dist);
-    for(k=0;k<3;k++) {
-        closest_chain[k]=start[k]+*chain_t*(end[k]-start[k]);
-        n[k]=scaled_dist>0.000001f ? (p[k]-q[k])/scaled_dist : 0;
-    }
-    if(scaled_dist<=0.000001f) {
-        /* Choose a direction across the capsule, not along its centerline. */
-        int least=fabsf(b[0])<fabsf(b[1])?0:1;
-        if(fabsf(b[2])<fabsf(b[least])) least=2;
-        n[(least+1)%3]=b[(least+2)%3];
-        n[(least+2)%3]=-b[(least+1)%3];
-        float length=physx_vec3_len(n);
-        if(length>0.000001f) for(k=0;k<3;k++) n[k]/=length;
-        else n[least]=1;
-    }
-    for(k=0;k<3;k++) { n[k]/=axes[k]; normal_len+=n[k]*n[k]; }
-    normal_len=sqrtf(normal_len);
-    if(!isfinite(normal_len) || normal_len<=0.000001f) return 0;
-    *radius=1.0f/normal_len;
-    *dist=scaled_dist*(*radius);
-    *margin=*dist-*radius;
-    /* A virtual center encodes the gradient for the shared contact collector.
-       At an exact crossing retain a tiny direction vector for its normal. */
-    for(k=0;k<3;k++)
-        closest_pair[k]=closest_chain[k]-n[k]/normal_len*fmaxf(*dist,.0002f);
-    return 1;
-}
-
 static int body_chain_collider_local_point_in_chain_space(
     const body_chain_collider_person_state_t *chain_frame,
     const body_chain_collider_person_state_t *body_state,
@@ -3736,11 +3687,9 @@ static int body_chain_testicle_cross_points_local(int person_index,
        near the shared attachment and lifts the first penis joint. Do not use
        leftover solver output after ownership has been released. */
     if (testicle_physics_cfg.enabled &&
-        testicle_physics_cfg.enabled_person[person_index]) {
-        /* Preserve the original enabled-chain readiness and candidate path. */
-        if (!state->initialized || !state->active_logged) return 0;
-        if (body_contact_candidate_points(state,&testicle_physics_cfg,now,points)) return 1;
-    }
+        testicle_physics_cfg.enabled_person[person_index] &&
+        state->initialized && state->active_logged &&
+        body_contact_candidate_points(state,&testicle_physics_cfg,now,points)) return 1;
     return body_chain_testicle_collision_points_local(
         collider_state, state, points, NULL, now);
 }
@@ -4931,22 +4880,10 @@ static void body_chain_compute_collider_projection(int person_index,
             float *start = chain_points[i];
             float *end = chain_points[i + 1];
             float chain_len_at_start = i == 0 ? 0.0f : cumulative_len[i - 1];
-            /* Native testicles cannot yield to PhysX. Protect the shaft/tip
-               with their configured, offset capsule rather than the narrow
-               mutual-chain probe. Keep the first segment and both-enabled
-               response exactly as before, including attachment allowances.
-               Require the validated bone sample before using this path. */
-            int native_testicle_distal_contact =
-                collider_person_index == person_index && !target_is_testicle &&
-                i > 0 && passive_chain_ready == 2 &&
-                !(testicle_physics_cfg.enabled &&
-                  testicle_physics_cfg.enabled_person[person_index]) &&
-                collider_state->valid[BODY_COLLIDER_TESTICLES_01] &&
-                collider_state->valid[BODY_COLLIDER_TESTICLES_02];
 
             if ((collision_scope_mask &
                  BODY_CHAIN_COLLIDER_GROUP_GENITALS) &&
-                passive_chain_ready && !native_testicle_distal_contact) {
+                passive_chain_ready) {
                 int same_person_active_penis_cross =
                     collider_person_index == person_index &&
                     target_is_testicle &&
@@ -4962,18 +4899,15 @@ static void body_chain_compute_collider_projection(int person_index,
                     body_chain_collider_person_cfg[collider_person_index].chain_radius :
                     body_chain_penis_radius();
                 float same_person_cross_radius =
-                    owner_chain_radius * 0.75f;
+                    body_chain_penis_radius() +
+                    body_chain_collider_visual_radius_for_node(
+                        BODY_COLLIDER_TESTICLES_MID);
                 int passive_segment_count =
                     passive_chain_ready == 2 ? 2 : 3;
-                if (same_person_cross_radius >
-                    owner_chain_radius) {
-                    same_person_cross_radius =
-                        owner_chain_radius;
-                }
-                if (same_person_cross_radius < 0.001f) {
-                    same_person_cross_radius =
-                        owner_chain_radius;
-                }
+                /* Self-contact needs both physical radii too. The former
+                   0.75 * owner radius allowed most of the testicle volume to
+                   be crossed, especially when native testicles cannot yield
+                   to this solver. Keep attachment filtering separate below. */
                 for (passive_segment = 0;
                      passive_segment < passive_segment_count;
                      passive_segment++) {
@@ -4999,11 +4933,13 @@ static void body_chain_compute_collider_projection(int person_index,
                         const char *passive_label =
                             passive_chain_names[passive_segment];
                         if (same_person_active_penis_cross &&
+                            i == 0 &&
                             passive_segment == 0 &&
                             passive_pair_t < 0.45f) {
                             continue;
                         }
                         if (same_person_testicle_cross &&
+                            i == 0 &&
                             passive_segment == 0 &&
                             passive_pair_t < 0.45f) {
                             continue;
@@ -5034,12 +4970,11 @@ static void body_chain_compute_collider_projection(int person_index,
 
             if ((collision_scope_mask &
                  BODY_CHAIN_COLLIDER_GROUP_GENITALS) &&
-                (native_testicle_distal_contact ||
-                 !(collider_person_index == person_index &&
+                !(collider_person_index == person_index &&
                   (target_is_testicle || passive_chain_ready == 2 ||
                    (testicle_physics_cfg.enabled &&
                     testicle_physics_cfg.enabled_person[person_index] &&
-                    body_chain_collider_cfg.testicle_collision_enabled)))) &&
+                    body_chain_collider_cfg.testicle_collision_enabled))) &&
                 collider_state->valid[BODY_COLLIDER_TESTICLES_01] &&
                 collider_state->valid[BODY_COLLIDER_TESTICLES_02]) {
                 float pair_a[3];
@@ -5064,22 +4999,13 @@ static void body_chain_compute_collider_projection(int person_index,
                     body_chain_collider_node_in_chain_space(
                         chain_collider_state, collider_state,
                         BODY_COLLIDER_TESTICLES_02, pair_b) &&
-                    (native_testicle_distal_contact ?
-                     body_chain_native_testicle_pair_margin(
-                        start, end, pair_a, pair_b,
-                        body_chain_collider_pair_sweep_radius(current_collider_sweep,
-                            BODY_COLLIDER_TESTICLES_01,BODY_COLLIDER_TESTICLES_02),
-                        &pair_chain_t,&pair_t,pair_closest_chain,pair_closest,
-                        &pair_dist,&radius,&pair_margin) :
-                     body_chain_collider_pair_margin(
+                    body_chain_collider_pair_margin(
                         start, end, chain_len_at_start, 0.0f,
                         pair_a, pair_b, radius, &pair_chain_t, &pair_t,
                         pair_closest_chain, pair_closest, &pair_dist,
-                        &pair_margin, &pair_chain_distance))) {
+                        &pair_margin, &pair_chain_distance)) {
                     BODY_CHAIN_ACCUMULATE_CONTACT(
-                        native_testicle_distal_contact ?
-                            "native_testicles_distal" : "testicles_pair",
-                        BODY_COLLIDER_TESTICLES_MID,
+                        "testicles_pair", BODY_COLLIDER_TESTICLES_MID,
                         i, pair_chain_t, pair_dist, radius, pair_margin,
                         pair_closest_chain, pair_closest,
                         pair_a, pair_b);
